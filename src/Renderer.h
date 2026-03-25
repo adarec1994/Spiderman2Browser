@@ -16,7 +16,7 @@ struct GPUMesh {
     int          n_indices = 0;
 
     void draw() const;
-    void free();
+    void release();
 };
 
 // All submeshes for one model
@@ -26,7 +26,7 @@ struct GPUModel {
     float                scale = 1.f;
 
     void draw() const;
-    void free();
+    void release();
 };
 
 // Skeleton line buffer
@@ -37,16 +37,19 @@ struct GPUSkeleton {
     int          n_pts  = 0;              // joint count
 
     void build(const Skeleton& sk);
-    void draw()        const;   // bone lines
-    void draw_joints() const;   // joint dots
-    void free();
+    void draw()           const;   // bone lines
+    void draw_joints()    const;   // all joint dots
+    void draw_joint(int i) const;  // single joint (selected)
+    void release();
 };
 
 class Renderer {
 public:
-    bool wireframe  = false;
-    bool show_grid  = true;
-    bool show_skel  = true;
+    bool  wireframe    = false;
+    bool  show_grid    = true;
+    bool  show_skel    = true;
+    int   sel_bone     = -1;    // highlighted bone index (-1 = none)
+    float model_rot_y  = 0.f;  // whole-model Y rotation (radians)
 
     void init();                  // compile shaders, build grid
     void shutdown();

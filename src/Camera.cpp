@@ -1,5 +1,6 @@
 #include "Camera.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <cmath>
 
 void Camera::reset() {
@@ -9,15 +10,18 @@ void Camera::reset() {
     pan   = {0,0,0};
 }
 
-glm::mat4 Camera::view() const {
+glm::vec3 Camera::eye() const {
     float yr = glm::radians(yaw);
     float pr = glm::radians(pitch);
-    glm::vec3 eye = glm::vec3(
+    return glm::vec3(
         dist * cosf(pr) * sinf(yr),
         dist * sinf(pr),
         dist * cosf(pr) * cosf(yr)
     ) + pan;
-    return glm::lookAt(eye, pan, glm::vec3(0,1,0));
+}
+
+glm::mat4 Camera::view() const {
+    return glm::lookAt(eye(), pan, glm::vec3(0,1,0));
 }
 
 glm::mat4 Camera::proj(float aspect) const {
@@ -30,6 +34,20 @@ glm::mat4 Camera::mvp(float aspect, glm::vec3 center, float scale) const {
     return proj(aspect) * view() * S * T;
 }
 
+glm::vec3 Camera::ray_dir(float mx, float my,
+                           int vp_x, int vp_w, int vp_h) const {
+    // NDC [-1,1]
+    float nx = ((mx - vp_x) / vp_w) * 2.f - 1.f;
+    float ny = 1.f - (my / vp_h) * 2.f;
+    float aspect = (float)vp_w / (float)vp_h;
+
+    glm::vec4 clip  = {nx, ny, -1.f, 1.f};
+    glm::vec4 eye_  = glm::inverse(proj(aspect)) * clip;
+    eye_             = {eye_.x, eye_.y, -1.f, 0.f};
+    glm::vec3 world = glm::normalize(glm::vec3(glm::inverse(view()) * eye_));
+    return world;
+}
+
 void Camera::orbit(float dx, float dy) {
     yaw   += dx * 0.5f;
     pitch  = glm::clamp(pitch - dy * 0.5f, -89.f, 89.f);
@@ -38,10 +56,9 @@ void Camera::orbit(float dx, float dy) {
 void Camera::do_pan(float dx, float dy) {
     float yr = glm::radians(yaw);
     glm::vec3 right = { cosf(yr), 0.f, -sinf(yr) };
-    glm::vec3 up    = { 0.f, 1.f, 0.f };
     float spd = dist * 0.002f;
     pan -= right * dx * spd;
-    pan += up    * dy * spd;
+    pan += glm::vec3(0,1,0) * dy * spd;
 }
 
 void Camera::zoom(float delta) {

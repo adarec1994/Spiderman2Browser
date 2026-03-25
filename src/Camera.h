@@ -10,11 +10,16 @@ public:
 
     void reset();
 
-    glm::mat4 view()            const;
+    glm::mat4 view()             const;
     glm::mat4 proj(float aspect) const;
     glm::mat4 mvp(float aspect, glm::vec3 center, float scale) const;
 
-    // Mouse interaction helpers
+    glm::vec3 eye()  const;
+    // Unproject screen pixel to world-space ray direction.
+    // vp_x/vp_w/vp_h: viewport x-offset, width, height (px). mx/my: screen px.
+    glm::vec3 ray_dir(float mx, float my,
+                      int vp_x, int vp_w, int vp_h) const;
+
     void orbit(float dx, float dy);
     void do_pan(float dx, float dy);
     void zoom(float delta);

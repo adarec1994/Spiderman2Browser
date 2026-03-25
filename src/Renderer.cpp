@@ -14,11 +14,12 @@ static const char* VERT_SRC = R"(
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
-uniform mat4 uMVP;
+uniform mat4  uMVP;
+uniform float uPointSize;
 out vec2 vUV;
 void main(){
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    gl_PointSize = 6.0;
+    gl_Position  = uMVP * vec4(aPos, 1.0);
+    gl_PointSize = uPointSize;
     vUV = aUV;
 }
 )";
@@ -61,14 +62,14 @@ void GPUMesh::draw() const {
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindVertexArray(0);
 }
-void GPUMesh::free() {
+void GPUMesh::release() {
     glDeleteVertexArrays(1,&vao); glDeleteBuffers(1,&vbo); glDeleteBuffers(1,&ibo);
     vao=vbo=ibo=0;
 }
 
 // ── GPUModel ──────────────────────────────────────────────
 void GPUModel::draw() const { for (auto& m : meshes) m.draw(); }
-void GPUModel::free()       { for (auto& m : meshes) m.free(); }
+void GPUModel::release()       { for (auto& m : meshes) m.release(); }
 
 // ── GPUSkeleton ───────────────────────────────────────────
 void GPUSkeleton::build(const Skeleton& sk) {
@@ -120,7 +121,13 @@ void GPUSkeleton::draw_joints() const {
     glBindVertexArray(0);
 }
 
-void GPUSkeleton::free() {
+void GPUSkeleton::draw_joint(int i) const {
+    if (i < 0 || i >= n_pts) return;
+    glBindVertexArray(pt_vao);
+    glDrawArrays(GL_POINTS, i, 1);
+    glBindVertexArray(0);
+}
+void GPUSkeleton::release() {
     glDeleteVertexArrays(1,&vao);    glDeleteBuffers(1,&vbo);
     glDeleteVertexArrays(1,&pt_vao); glDeleteBuffers(1,&pt_vbo);
     vao=vbo=pt_vao=pt_vbo=0;
@@ -237,7 +244,12 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     if (!model) { glDisable(GL_SCISSOR_TEST); return; }
 
     float aspect = (float)vp_w / (float)std::max(vp_h, 1);
-    glm::mat4 MVP = cam.mvp(aspect, model->center, model->scale);
+
+    // Model MVP with optional Y rotation
+    glm::mat4 S  = glm::scale(glm::mat4(1), glm::vec3(1.f/model->scale));
+    glm::mat4 T  = glm::translate(glm::mat4(1), -model->center);
+    glm::mat4 Ry = glm::rotate(glm::mat4(1), model_rot_y, glm::vec3(0,1,0));
+    glm::mat4 MVP = cam.proj(aspect) * cam.view() * S * Ry * T;
 
     glUseProgram(m_shader);
     glUniformMatrix4fv(uloc("uMVP"), 1, GL_FALSE, glm::value_ptr(MVP));
@@ -245,7 +257,7 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     glUniform1i(uloc("uWire"), 0);
     glActiveTexture(GL_TEXTURE0);
 
-    // Solid pass
+    // Solid mesh
     for (auto& mesh : model->meshes) {
         glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
         mesh.draw();
@@ -261,30 +273,38 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
 
-    // Skeleton — always on top, no depth occlusion
+    // Skeleton — always on top
     if (show_skel && skel && skel->n > 0) {
-        glm::mat4 S = glm::scale(glm::mat4(1), glm::vec3(1.f/model->scale));
-        glm::mat4 T = glm::translate(glm::mat4(1), -model->center);
+        // Skeleton is in the same raw coordinate space as the model,
+        // so use same S and T but WITHOUT Ry (bones already in world pos)
         glm::mat4 skelMVP = cam.proj(aspect) * cam.view() * S * T;
         glUniformMatrix4fv(uloc("uMVP"), 1, GL_FALSE, glm::value_ptr(skelMVP));
         glUniform1i(uloc("uWire"), 1);
 
         glDisable(GL_DEPTH_TEST);
 
-        // Bone lines — dark desaturated blue-white
+        // Bone lines
         glLineWidth(1.5f);
-        glUniform3f(uloc("uWireCol"), 0.55f, 0.75f, 1.0f);
+        glUniform3f(uloc("uWireCol"), 0.45f, 0.65f, 1.0f);
         skel->draw();
         glLineWidth(1.f);
 
-        // Joint dots — bright white
+        // All joint dots — white, 5px
         glEnable(GL_PROGRAM_POINT_SIZE);
-        glPointSize(6.f);
-        glUniform3f(uloc("uWireCol"), 1.f, 1.f, 1.f);
+        glUniform1f(uloc("uPointSize"), 5.f);
+        glUniform3f(uloc("uWireCol"), 0.85f, 0.85f, 0.85f);
         skel->draw_joints();
-        glDisable(GL_PROGRAM_POINT_SIZE);
 
+        // Selected joint — bright orange, 9px
+        if (sel_bone >= 0) {
+            glUniform1f(uloc("uPointSize"), 9.f);
+            glUniform3f(uloc("uWireCol"), 1.f, 0.55f, 0.05f);
+            skel->draw_joint(sel_bone);
+        }
+
+        glDisable(GL_PROGRAM_POINT_SIZE);
         glEnable(GL_DEPTH_TEST);
+
         glUniformMatrix4fv(uloc("uMVP"), 1, GL_FALSE, glm::value_ptr(MVP));
     }
 
