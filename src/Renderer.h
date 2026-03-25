@@ -6,12 +6,12 @@
 #include <string>
 #include <vector>
 
-// Per-submesh GPU data
 struct GPUMesh {
     std::string  mat_name;
     unsigned int tex_id    = 0;
     unsigned int vao       = 0;
-    unsigned int vbo       = 0;
+    unsigned int vbo       = 0;  // positions + uvs
+    unsigned int bone_vbo  = 0;  // bone idx + wt (vec4+vec4)
     unsigned int ibo       = 0;
     int          n_indices = 0;
 
@@ -19,7 +19,6 @@ struct GPUMesh {
     void release();
 };
 
-// All submeshes for one model
 struct GPUModel {
     std::vector<GPUMesh> meshes;
     glm::vec3            center{0};
@@ -29,45 +28,49 @@ struct GPUModel {
     void release();
 };
 
-// Skeleton line buffer
 struct GPUSkeleton {
-    unsigned int vao    = 0, vbo    = 0;  // bone lines
-    unsigned int pt_vao = 0, pt_vbo = 0;  // joint points
-    int          n      = 0;              // line vertex count
-    int          n_pts  = 0;              // joint count
+    unsigned int vao    = 0, vbo    = 0;
+    unsigned int pt_vao = 0, pt_vbo = 0;
+    int          n      = 0;
+    int          n_pts  = 0;
 
     void build(const Skeleton& sk);
-    void draw()           const;   // bone lines
-    void draw_joints()    const;   // all joint dots
-    void draw_joint(int i) const;  // single joint (selected)
+    void draw()            const;
+    void draw_joints()     const;
+    void draw_joint(int i) const;
     void release();
 };
 
 class Renderer {
 public:
-    bool  wireframe    = false;
-    bool  show_grid    = true;
-    bool  show_skel    = true;
-    int   sel_bone     = -1;    // highlighted bone index (-1 = none)
-    float model_rot_y  = 0.f;  // whole-model Y rotation (radians)
+    bool  wireframe   = false;
+    bool  show_grid   = true;
+    bool  show_skel   = true;
+    int   sel_bone    = -1;
+    float model_rot_y = 0.f;
 
-    void init();                  // compile shaders, build grid
+    void init();
     void shutdown();
 
-    // Upload model/skeleton to GPU. Caller owns the CPU-side objects.
     GPUModel*    upload_model(const XBXModel* model);
     GPUSkeleton* upload_skeleton(const Skeleton* sk);
 
-    // Draw the full 3-D scene
+    // Upload 60 skinning matrices (current_pose * inv_bind_pose).
+    // Call this whenever bones change. Pass nullptr to reset to identity (bind pose).
+    void set_bone_matrices(const glm::mat4* mats, int count);
+
     void draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
                     const GPUModel* model, const GPUSkeleton* skel);
 
 private:
-    unsigned int m_shader = 0;
-    unsigned int m_grid_vao = 0;
-    unsigned int m_grid_vbo = 0;
+    unsigned int m_shader   = 0;
+    unsigned int m_grid_vao = 0, m_grid_vbo = 0;
     int          m_grid_n   = 0;
 
-    int uloc(const char* name);
+    // Bone matrix UBO / uniform cache
+    glm::mat4    m_bone_mats[60];
+    bool         m_bones_dirty = true;
+
+    int  uloc(const char* name);
     void build_grid(int half, float step);
 };

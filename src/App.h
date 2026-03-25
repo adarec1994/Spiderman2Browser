@@ -6,7 +6,9 @@
 #include "Skeleton.h"
 #include <string>
 #include <vector>
+#include <array>
 #include <memory>
+#include <glm/glm.hpp>
 
 struct GLFWwindow;
 
@@ -29,47 +31,52 @@ private:
     GPUModel*    m_gpu_model = nullptr;
     GPUSkeleton* m_gpu_skel  = nullptr;
 
-    // Skeleton CPU copy for picking and bone rotation
-    std::unique_ptr<Skeleton> m_skeleton;
+    std::unique_ptr<Skeleton>  m_skeleton;
 
-    // Bone selection
+    // Skinning matrices
+    static constexpr int N_BONES = 60;
+    std::array<glm::mat4, 60>  m_bind_pose;    // from XBX, column-major
+    std::array<glm::mat4, 60>  m_inv_bind;     // inverse of bind pose
+    std::array<glm::mat4, 60>  m_cur_pose;     // current animated pose
+    std::array<glm::mat4, 60>  m_skinning;     // cur_pose[i] * inv_bind[i]
+    bool                        m_has_bones = false;
+
+    // Selection
     int   m_sel_bone = -1;
 
-    // Blender-style R-rotate mode
-    // Works for both selected bone and the whole model (if no bone selected)
-    bool      m_rot_mode   = false;
-    double    m_rot_start_x = 0;   // screen x when R was pressed
-    double    m_rot_start_y = 0;
-    float     m_rot_accum  = 0.f;  // accumulated angle (radians)
-    glm::vec3 m_rot_axis{0,1,0};   // world-space axis (default Y; X/Z constrained)
-    // Saved bone poses for cancel (ESC)
-    std::vector<glm::vec3> m_bone_pose_backup;
-    // Model rotation (Euler Y) for whole-model R-rotate
-    float     m_model_rot_y = 0.f;
+    // Rotate mode (Blender-style R)
+    bool      m_rot_mode    = false;
+    double    m_rot_start_x = 0;
+    float     m_rot_accum   = 0.f;
+    glm::vec3 m_rot_axis{0,1,0};
+    std::array<glm::mat4, 60> m_cur_pose_backup;
 
-    // Mouse drag state
-    bool  m_drag_l = false, m_drag_r = false;
+    // Whole-model rotation
+    float m_model_rot_y = 0.f;
+
+    // Mouse
+    bool   m_drag_l = false, m_drag_r = false;
     double m_lx = 0, m_ly = 0;
 
     void load_file(int idx);
     void scan_folder(const std::string& folder);
     void setup_callbacks();
 
-    // Picking
+    void compute_skinning();
+    void upload_skinning();
+
     int  pick_bone(double mx, double my);
     void try_select(double mx, double my);
 
-    // Bone / model rotation
-    void begin_rotate(double mx, double my);
+    void begin_rotate(double mx);
     void update_rotate(double mx);
     void confirm_rotate();
     void cancel_rotate();
     void rebuild_skel_gpu();
 
-    // GLFW callbacks
-    static void cb_key       (GLFWwindow*, int, int, int, int);
-    static void cb_mouse_btn (GLFWwindow*, int, int, int);
-    static void cb_cursor    (GLFWwindow*, double, double);
-    static void cb_scroll    (GLFWwindow*, double, double);
-    static void cb_resize    (GLFWwindow*, int, int);
+    static void cb_key       (GLFWwindow*,int,int,int,int);
+    static void cb_mouse_btn (GLFWwindow*,int,int,int);
+    static void cb_cursor    (GLFWwindow*,double,double);
+    static void cb_scroll    (GLFWwindow*,double,double);
+    static void cb_resize    (GLFWwindow*,int,int);
 };
