@@ -112,7 +112,7 @@ XBXModel* parse_xbx(const std::string& filepath) {
         glm::mat4 m;
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
-                m[c][r] = rd<float>(d, base + (r*4+c)*4); // transpose row→col major
+                m[c][r] = rd<float>(d, base + (c*4+r)*4); // col-major: file[col][row]
         model->bind_pose[i] = m;
     }
 
