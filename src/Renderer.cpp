@@ -185,7 +185,7 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
     glm::vec3 mn(1e9f), mx(-1e9f);
     for (auto& sm:model->submeshes) for (auto& p:sm.positions) { mn=glm::min(mn,p); mx=glm::max(mx,p); }
     gm->center = (mn+mx)*0.5f;
-    gm->scale  = std::max({mx.x-mn.x, mx.y-mn.y, mx.z-mn.z, 1e-6f});
+    gm->scale  = std::max(std::max(mx.x-mn.x, mx.y-mn.y), std::max(mx.z-mn.z, 1e-6f));
 
     for (auto& sm : model->submeshes) {
         GPUMesh m;
@@ -231,6 +231,15 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
         gm->meshes.push_back(std::move(m));
     }
     return gm;
+}
+
+void GPUModel::update_mesh_indices(int mesh_idx, const std::vector<uint32_t>& tris) {
+    if (mesh_idx < 0 || mesh_idx >= (int)meshes.size()) return;
+    GPUMesh& m = meshes[mesh_idx];
+    m.n_indices = (int)tris.size();
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m.ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, tris.size()*4, tris.data(), GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 GPUSkeleton* Renderer::upload_skeleton(const Skeleton* sk) {
@@ -280,6 +289,18 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     for (auto& mesh : model->meshes) {
         glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
         mesh.draw();
+    }
+
+    // Selected submesh — green overlay (drawn before optional wireframe so wireframe is on top)
+    if (sel_submesh >= 0 && sel_submesh < (int)model->meshes.size()) {
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glUniform1i(uloc("uWire"), 1);
+        glUniform3f(uloc("uWireCol"), 0.1f, 1.0f, 0.3f);
+        glLineWidth(2.5f);
+        glUniform1i(uloc("uHasTex"), 0);
+        model->meshes[sel_submesh].draw();
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glLineWidth(1.f);
     }
 
     // Wireframe

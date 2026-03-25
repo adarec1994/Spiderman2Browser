@@ -4,6 +4,7 @@
 #include "UI.h"
 #include "XBXParser.h"
 #include "Skeleton.h"
+#include "Animation.h"
 #include <string>
 #include <vector>
 #include <array>
@@ -35,10 +36,10 @@ private:
 
     // Skinning matrices
     static constexpr int N_BONES = 60;
-    std::array<glm::mat4, 60>  m_bind_pose;    // from XBX, column-major
-    std::array<glm::mat4, 60>  m_inv_bind;     // inverse of bind pose
-    std::array<glm::mat4, 60>  m_cur_pose;     // current animated pose
-    std::array<glm::mat4, 60>  m_skinning;     // cur_pose[i] * inv_bind[i]
+    std::array<glm::mat4, 60>  m_bind_pose;
+    std::array<glm::mat4, 60>  m_inv_bind;
+    std::array<glm::mat4, 60>  m_cur_pose;
+    std::array<glm::mat4, 60>  m_skinning;
     bool                        m_has_bones = false;
 
     // Selection
@@ -57,6 +58,31 @@ private:
     // Mouse
     bool   m_drag_l = false, m_drag_r = false;
     double m_lx = 0, m_ly = 0;
+
+    // ── Animation ─────────────────────────────────────────────────────────────
+    std::vector<AnimClip> m_anim_clips;
+    int                   m_anim_sel    = -1;   // selected clip index
+    bool                  m_anim_play   = false;
+    float                 m_anim_time   = 0.f;
+    double                m_last_frame  = 0.0;  // glfwGetTime() at last tick
+
+    void load_animations(const std::string& folder);
+    void select_animation(int idx);
+    void tick_animation(double now);
+    void apply_animation_pose(float t);
+
+    // Maps animated bone index (0..clip.track_count/3) → skeleton bone index (0..59).
+    // Built when a clip is selected, using a name-based or index fallback mapping.
+    std::vector<int> m_anim_bone_map;
+
+    void build_anim_bone_map(const AnimClip& clip);
+
+    // Prim-type override
+    struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;
+                         std::vector<glm::vec3> positions; };
+    std::vector<RawMeshData> m_cached_raw;  // one per submesh
+    void rebuild_prim_override(int smi, int sel);
+    // ─────────────────────────────────────────────────────────────────────────
 
     void load_file(int idx);
     void scan_folder(const std::string& folder);

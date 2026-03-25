@@ -7,6 +7,8 @@
 struct XBXSubmesh {
     std::string            mat_name;
     std::string            tex_name;
+    uint32_t               prim_type = 0;   // raw ptr+0x28 value from file
+    std::vector<uint16_t>  raw_indices;     // original u16 index buffer (empty if none)
     std::vector<glm::vec3> positions;
     std::vector<glm::vec2> uvs;
     std::vector<uint32_t>  indices;       // triangle list

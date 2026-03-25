@@ -26,6 +26,7 @@ struct GPUModel {
 
     void draw() const;
     void release();
+    void update_mesh_indices(int mesh_idx, const std::vector<uint32_t>& tris);
 };
 
 struct GPUSkeleton {
@@ -47,6 +48,7 @@ public:
     bool  show_grid   = true;
     bool  show_skel   = true;
     int   sel_bone    = -1;
+    int   sel_submesh = -1;
     float model_rot_y = 0.f;
 
     void init();

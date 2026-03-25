@@ -81,6 +81,7 @@ set(SOURCES
         src/App.cpp
         src/XBXParser.cpp
         src/Skeleton.cpp
+        src/Animation.cpp
         src/Renderer.cpp
         src/Camera.cpp
         src/Texture.cpp
