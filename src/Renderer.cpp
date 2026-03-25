@@ -185,7 +185,7 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
     glm::vec3 mn(1e9f), mx(-1e9f);
     for (auto& sm:model->submeshes) for (auto& p:sm.positions) { mn=glm::min(mn,p); mx=glm::max(mx,p); }
     gm->center = (mn+mx)*0.5f;
-    gm->scale  = std::max({mx.x-mn.x, mx.y-mn.y, mx.z-mn.z, 1e-6f});
+    gm->scale  = std::max(std::max(mx.x-mn.x, mx.y-mn.y), std::max(mx.z-mn.z, 1e-6f));
 
     for (auto& sm : model->submeshes) {
         GPUMesh m;
