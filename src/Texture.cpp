@@ -119,14 +119,116 @@ unsigned int load_texture(const std::string& path) {
     return tid;
 }
 
+// ── Global texture registry ───────────────────────────────
+// Built once by build_tex_registry(root_dir). Maps lowercase stem (no ext)
+// and lowercase filename → absolute path. Used as fallback when local search fails.
+static std::unordered_map<std::string, std::string> g_registry;
+static std::vector<std::string>                     g_stems_sorted; // for prefix matching
+
+void build_tex_registry(const std::string& root_dir) {
+    g_registry.clear();
+    g_stems_sorted.clear();
+    std::error_code ec;
+    size_t count = 0;
+    for (auto& entry : fs::recursive_directory_iterator(root_dir, ec)) {
+        if (ec) { ec.clear(); continue; }
+        if (!entry.is_regular_file()) continue;
+        std::string fn  = entry.path().filename().string();
+        std::string fnl = fn;
+        std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+        // Only index loadable image files — never .dat, .xbx, etc.
+        std::string ext2 = fs::path(fnl).extension().string();
+        if (ext2 != ".dds" && ext2 != ".tga" && ext2 != ".bmp" &&
+            ext2 != ".png" && ext2 != ".jpg" && ext2 != ".jpeg") continue;
+        // store by full lowercase filename
+        if (g_registry.find(fnl) == g_registry.end())
+            g_registry[fnl] = entry.path().string();
+        // also store by stem (no extension) for stemmed lookups
+        std::string stem = fs::path(fnl).stem().string();
+        if (g_registry.find(stem) == g_registry.end()) {
+            g_registry[stem] = entry.path().string();
+            g_stems_sorted.push_back(stem);
+        }
+        ++count;
+    }
+    std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
+    std::cerr << "[TEXREG] indexed " << count << " image files under " << root_dir << "\n";
+}
+
+static unsigned int registry_lookup(const std::string& hint) {
+    if (hint.empty() || g_registry.empty()) return 0;
+
+    // Strip non-DDS extension before looking up
+    std::string base = hint;
+    {
+        static const char* strip_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
+        std::string lo = hint;
+        std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+        for (int i = 0; strip_exts[i]; ++i) {
+            size_t elen = strlen(strip_exts[i]);
+            if (lo.size() > elen && lo.substr(lo.size()-elen) == strip_exts[i]) {
+                base = hint.substr(0, hint.size()-elen);
+                break;
+            }
+        }
+    }
+    std::string basel;
+    basel = base;
+    std::transform(basel.begin(), basel.end(), basel.begin(), ::tolower);
+
+    std::vector<std::string> tries = {
+        basel + ".dds",
+        basel,
+        [&]{ std::string s=basel; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".dds"; }(),
+        [&]{ std::string s=base; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".DDS"; }(),
+    };
+    for (auto& t : tries) {
+        auto it = g_registry.find(t);
+        if (it != g_registry.end()) return load_texture(it->second);
+    }
+
+    // Prefix match: "armored_thug" → "armored_thug_00000002", "armored_thug_alpha", etc.
+    // Use lower_bound on the sorted stems list to find candidates starting with basel + "_"
+    // Pick the shortest match (most specific base before the suffix).
+    if (!g_stems_sorted.empty()) {
+        std::string prefix = basel + "_";
+        auto it = std::lower_bound(g_stems_sorted.begin(), g_stems_sorted.end(), prefix);
+        std::string best;
+        for (; it != g_stems_sorted.end() && it->substr(0, prefix.size()) == prefix; ++it) {
+            if (best.empty() || it->size() < best.size())
+                best = *it;
+        }
+        if (!best.empty()) {
+            auto rit = g_registry.find(best);
+            if (rit != g_registry.end()) return load_texture(rit->second);
+        }
+    }
+    return 0;
+}
+
 unsigned int find_texture(const std::string& hint, const std::string& model_dir) {
     if (hint.empty()) return 0;
 
+    // Strip any non-DDS image extension before building variant names
+    std::string base = hint;
+    {
+        static const char* strip_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
+        std::string lo = hint;
+        std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+        for (int i = 0; strip_exts[i]; ++i) {
+            size_t elen = strlen(strip_exts[i]);
+            if (lo.size() > elen && lo.substr(lo.size()-elen) == strip_exts[i]) {
+                base = hint.substr(0, hint.size()-elen);
+                break;
+            }
+        }
+    }
+
     std::vector<std::string> variants = {
-        hint, hint + ".dds",
-        [&]{ std::string s=hint; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".dds"; }(),
-        [&]{ std::string s=hint; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s+".dds"; }(),
-        [&]{ std::string s=hint; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".DDS"; }(),
+        base, base + ".dds",
+        [&]{ std::string s=base; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".dds"; }(),
+        [&]{ std::string s=base; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s+".dds"; }(),
+        [&]{ std::string s=base; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s+".DDS"; }(),
     };
 
     std::vector<std::string> search_dirs = {
@@ -137,13 +239,13 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
 
     for (auto& dir : search_dirs) {
         if (!fs::is_directory(dir)) continue;
-        // Build lower-case filename map
         std::unordered_map<std::string, std::string> lmap;
         for (auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;  // skip directories
             std::string fn = entry.path().filename().string();
             std::string fnl = fn;
             std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
-            lmap[fnl] = (fs::path(dir) / fn).string();
+            lmap[fnl] = entry.path().string();
         }
         for (auto& v : variants) {
             std::string vl = v;
@@ -151,6 +253,24 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
             auto it = lmap.find(vl);
             if (it != lmap.end()) return load_texture(it->second);
         }
+    }
+
+    // Global registry fallback — covers textures in other pack directories
+    return registry_lookup(hint);
+}
+
+unsigned int find_texture(const std::vector<std::string>& hints, const std::string& model_dir) {
+    for (const auto& h : hints) {
+        unsigned int tid = find_texture(h, model_dir);
+        if (tid) {
+            std::cerr << "[TEX] found: '" << h << "'\n";
+            return tid;
+        }
+    }
+    if (!hints.empty()) {
+        std::cerr << "[TEX] MISS: tried";
+        for (auto& h : hints) std::cerr << " '" << h << "'";
+        std::cerr << "\n";
     }
     return 0;
 }

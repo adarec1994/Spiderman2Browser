@@ -152,17 +152,101 @@ XBXModel* parse_xbx(const std::string& filepath) {
         uint32_t mat_ptr = rd<uint32_t>(d, ptr);
         std::string mat_name = (mat_ptr+32 < sz) ? read_mat_name(d, mat_ptr) : "sub"+std::to_string(si);
 
-        // Texture name: +0x24 is the shader/material type ("character", "smsimple", "smshiny", etc.)
-        // When +0x24 is one of those generic types, the real texture name is at +0x44.
+        // Mat struct string slots (each prefixed by 4 tag bytes):
+        //   +0x04: material/texture name (often diffuse tex, sometimes junk like "15 - default")
+        //   +0x24: shader type ("sm*", "character*", "material*") OR a real texture name
+        //   +0x44: primary texture name OR mesh instance ID (e.g. "xe_compstand000")
+        //   +0x64: secondary texture or overflow
+        //
+        // Build tex_candidates ordered best→worst; Renderer tries each until one loads.
         std::string tex_name;
-        if (mat_ptr + 0x64 <= sz) {
-            auto read_str = [&](size_t off) {
+        std::vector<std::string> tex_candidates;
+        if (mat_ptr + 0x80 <= sz) {
+            auto read_str = [&](size_t off) -> std::string {
                 const char* s = reinterpret_cast<const char*>(d + mat_ptr + off);
                 return std::string(s, strnlen(s, 28));
             };
+            // Engine shader-type identifiers — never a texture filename.
+            auto is_shader = [](const std::string& s) -> bool {
+                if (s.empty()) return true;
+                if (s.rfind("sm",        0) == 0) return true;
+                if (s.rfind("character", 0) == 0) return true;
+                if (s.rfind("material",  0) == 0) return true;
+                return false;
+            };
+            // A valid texture hint: no spaces, no slashes, no ' -' suffix junk,
+            // doesn't start with a digit, doesn't contain '#'.
+            auto looks_like_tex = [](const std::string& s) -> bool {
+                if (s.empty()) return false;
+                if (std::isdigit((unsigned char)s[0])) return false;
+                for (char c : s) {
+                    if (c == ' ' || c == '/' || c == '\\' || c == '#') return false;
+                }
+                return true;
+            };
+
+            std::string t04 = read_str(0x04);
             std::string t24 = read_str(0x24);
-            bool generic = t24.empty() || t24.rfind("sm", 0) == 0 || t24 == "character" || t24.rfind("material", 0) == 0;
-            tex_name = generic ? read_str(0x44) : t24;
+            std::string t44 = read_str(0x44);
+
+            auto push = [&](const std::string& s) {
+                if (s.empty()) return;
+                // Strip image extensions — there are only .dds files on disk
+                static const char* img_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
+                std::string clean = s;
+                std::string slo = s;
+                std::transform(slo.begin(), slo.end(), slo.begin(), ::tolower);
+                for (int i = 0; img_exts[i]; ++i) {
+                    size_t elen = strlen(img_exts[i]);
+                    if (slo.size() > elen && slo.substr(slo.size()-elen) == img_exts[i]) {
+                        clean = s.substr(0, s.size()-elen);
+                        break;
+                    }
+                }
+                if (clean.empty()) return;
+                if (std::find(tex_candidates.begin(), tex_candidates.end(), clean) == tex_candidates.end())
+                    tex_candidates.push_back(clean);
+            };
+
+            // All slots filtered through looks_like_tex + is_shader.
+            // +0x64 is NOT a texture: it's the next submesh mat name (linked list) or instance ID.
+            // Priority: t24 (real tex name) → t44 (primary slot) → t04
+            if (looks_like_tex(t24) && !is_shader(t24)) push(t24);
+            if (looks_like_tex(t44) && !is_shader(t44)) push(t44);
+            if (looks_like_tex(t04) && !is_shader(t04)) push(t04);
+
+            // Digit-strip: "rhino000" → also try "rhino"
+            std::vector<std::string> stripped;
+            for (const auto& c : tex_candidates) {
+                if (c.size() > 3) {
+                    const auto tail = c.substr(c.size() - 3);
+                    if (std::all_of(tail.begin(), tail.end(),
+                                    [](char ch){ return std::isdigit((unsigned char)ch); })) {
+                        std::string base = c.substr(0, c.size() - 3);
+                        if (!base.empty() &&
+                            std::find(tex_candidates.begin(), tex_candidates.end(), base) == tex_candidates.end())
+                            stripped.push_back(base);
+                    }
+                }
+            }
+            for (auto& s : stripped) push(s);
+
+            // _ifl strip: animated texture references like "sa_blg_strwal_com_ifl"
+            // → the actual DDS is the base name without "_ifl"
+            std::vector<std::string> ifl_stripped;
+            static const std::string IFL = "_ifl";
+            for (const auto& c : tex_candidates) {
+                if (c.size() > IFL.size() &&
+                    c.substr(c.size() - IFL.size()) == IFL) {
+                    std::string base = c.substr(0, c.size() - IFL.size());
+                    if (!base.empty() &&
+                        std::find(tex_candidates.begin(), tex_candidates.end(), base) == tex_candidates.end())
+                        ifl_stripped.push_back(base);
+                }
+            }
+            for (auto& s : ifl_stripped) push(s);
+
+            tex_name = tex_candidates.empty() ? "" : tex_candidates[0];
         }
 
         uint32_t vc       = rd<uint32_t>(d, ptr + 0x40);
@@ -172,7 +256,8 @@ XBXModel* parse_xbx(const std::string& filepath) {
         uint32_t fi_end   = fi_ends[si];
 
         if (vc == 0) continue;
-        if (stride != 24 && stride != 28 && stride != 32 && stride != 36 && stride != 40 && stride != 48)
+        if (stride != 16 && stride != 20 && stride != 24 && stride != 28 &&
+            stride != 32 && stride != 36 && stride != 40 && stride != 48)
             stride = STRIDE;
         if (vo + vc * stride > sz) continue;
 
@@ -182,7 +267,13 @@ XBXModel* parse_xbx(const std::string& filepath) {
         //   stride=24: xyz(12) + uv(8) + packed(4)
         //   stride=32: xyz(12) + packed(4) + uv(8) + bone(8)
         //   stride=36: xyz(12) + normal(12) + uv(8) + ...
-        uint32_t uv_off = (stride == 24) ? 12u : (stride == 36) ? 24u : 16u;
+        // UV offset by stride; clamp so we don't read past the vertex
+        uint32_t uv_off;
+        if      (stride == 36)               uv_off = 24u;
+        else if (stride == 24 || stride == 20) uv_off = 12u;
+        else if (stride >= 24)               uv_off = 16u;
+        else                                 uv_off = 0u;  // stride=16: no room for float UV
+        if (uv_off + 8u > stride)            uv_off = 0u;  // safety clamp
 
         // ── Bone palette: count at ptr+0x08, offset at ptr+0x0c ──
         uint32_t pal_cnt = rd<uint32_t>(d, ptr + 0x08);
@@ -196,9 +287,10 @@ XBXModel* parse_xbx(const std::string& filepath) {
         uint32_t prim_type = rd<uint32_t>(d, ptr + 0x28);
 
         XBXSubmesh sm;
-        sm.mat_name  = mat_name;
-        sm.tex_name  = tex_name;
-        sm.prim_type = prim_type;
+        sm.mat_name       = mat_name;
+        sm.tex_name       = tex_name;
+        sm.tex_candidates = tex_candidates;
+        sm.prim_type      = prim_type;
 
         sm.positions.resize(vc);
         sm.uvs.resize(vc);

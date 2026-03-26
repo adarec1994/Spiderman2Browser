@@ -1,4 +1,5 @@
 #include "App.h"
+#include "Texture.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
@@ -544,6 +545,9 @@ void App::scan_folder(const std::string& folder) {
     }
     std::sort(m_ui_state.files.begin(),m_ui_state.files.end());
     m_ui_state.status_msg = std::to_string(m_ui_state.files.size())+" files found";
+
+    // Build global texture registry for cross-pack resolution
+    build_tex_registry(folder);
 
     // Scan for animations in same folder
     load_animations(folder);

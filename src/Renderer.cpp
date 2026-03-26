@@ -191,7 +191,16 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
         GPUMesh m;
         m.mat_name  = sm.mat_name;
         m.n_indices = (int)sm.indices.size();
-        m.tex_id    = find_texture(sm.tex_name, dir);
+        m.tex_id    = find_texture(sm.tex_candidates.empty()
+                          ? std::vector<std::string>{sm.tex_name}
+                          : sm.tex_candidates, dir);
+        std::cerr << "[MODEL] SM" << gm->meshes.size()
+                  << " mat='" << sm.mat_name << "'"
+                  << " tex=" << (m.tex_id ? "OK" : "MISSING")
+                  << " candidates:";
+        for (auto& c : sm.tex_candidates) std::cerr << " '" << c << "'";
+        if (sm.tex_candidates.empty()) std::cerr << " '" << sm.tex_name << "'";
+        std::cerr << "\n";
 
         // Interleave XYZ + UV
         std::vector<float> vdata;

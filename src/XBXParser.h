@@ -6,7 +6,8 @@
 
 struct XBXSubmesh {
     std::string            mat_name;
-    std::string            tex_name;
+    std::string            tex_name;       // best single guess (tex_candidates[0])
+    std::vector<std::string> tex_candidates; // ordered: try each until one loads
     uint32_t               prim_type = 0;   // raw ptr+0x28 value from file
     std::vector<uint16_t>  raw_indices;     // original u16 index buffer (empty if none)
     std::vector<glm::vec3> positions;
