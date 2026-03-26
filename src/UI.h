@@ -8,11 +8,14 @@
 
 struct SubmeshInfo {
     std::string  mat_name;
+    std::string  shader_type;              // e.g. "smsimple", "smtranslucent"
+    std::vector<std::string> tex_candidates; // all resolved candidates from parser
+    int          tex_sel    = 0;           // current tex dropdown selection
     int          tri_count   = 0;
-    uint32_t     prim_raw    = 0;     // raw ptr+0x28 from file
-    const char*  prim_method = "";    // human label for current interpretation
+    uint32_t     prim_raw    = 0;
+    const char*  prim_method = "";
     bool         has_tex     = false;
-    int          method_sel  = 0;     // current dropdown selection
+    int          method_sel  = 0;
 };
 
 struct UIState {
@@ -30,6 +33,16 @@ struct UIState {
     bool                     anim_playing = false;
     float                    anim_time    = 0.f;
     float                    anim_dur     = 0.f;
+
+    // Material editor
+    bool mat_editor_open = false;
+    char tex_filter[128] = {};
+    std::vector<std::pair<std::string,std::string>> all_tex_entries;
+
+    // Texture preview
+    unsigned int preview_tex_id  = 0;
+    std::string  preview_tex_name;
+    bool         show_tex_preview = false;
 };
 
 struct UICallbacks {
@@ -38,7 +51,9 @@ struct UICallbacks {
     std::function<void()>                    on_reset_camera;
     std::function<void(int)>                 on_select_anim;
     std::function<void()>                    on_play_anim;
-    std::function<void(int,int)>             on_prim_override; // (submesh_idx, dropdown_sel)
+    std::function<void(int,int)>             on_prim_override;
+    std::function<void(int,int)>             on_tex_override;
+    std::function<void(int, const std::string&)> on_tex_assign; // (submesh_idx, stem)
 };
 
 class UI {
@@ -49,6 +64,7 @@ public:
     static std::string load_folder();
 
     void draw(UIState& state, UICallbacks& cb,
-              bool& wireframe, bool& show_grid, bool& show_skel,
+              bool& wireframe, bool& show_grid, bool& show_skel, bool& show_uv,
               int win_h);
+    void draw_mat_editor(UIState& state, UICallbacks& cb);
 };

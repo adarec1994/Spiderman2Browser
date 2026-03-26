@@ -85,6 +85,7 @@ set(SOURCES
         src/Renderer.cpp
         src/Camera.cpp
         src/Texture.cpp
+        src/Animation.cpp
         src/UI.cpp)
 
 add_executable(XBXViewer ${SOURCES})

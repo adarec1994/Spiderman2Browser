@@ -17,3 +17,6 @@ unsigned int find_texture(const std::vector<std::string>& hints, const std::stri
 // Build a global filename registry by recursively scanning root_dir.
 // Call once from App::scan_folder(). Enables cross-pack texture resolution.
 void build_tex_registry(const std::string& root_dir);
+
+// Returns all indexed stems + their file paths, sorted alphabetically.
+void get_registry_entries(std::vector<std::pair<std::string,std::string>>& out);

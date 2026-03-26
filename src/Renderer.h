@@ -47,6 +47,7 @@ public:
     bool  wireframe   = false;
     bool  show_grid   = true;
     bool  show_skel   = true;
+    bool  show_uv     = false;
     int   sel_bone    = -1;
     int   sel_submesh = -1;
     float model_rot_y = 0.f;

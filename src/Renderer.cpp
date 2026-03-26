@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -15,15 +16,17 @@ static const char* VERT_SRC = R"(
 #version 330 core
 layout(location=0) in vec3  aPos;
 layout(location=1) in vec2  aUV;
-layout(location=2) in vec4  aBoneIdx;  // global bone indices as floats
-layout(location=3) in vec4  aBoneWt;   // bone weights
+layout(location=2) in vec4  aBoneIdx;
+layout(location=3) in vec4  aBoneWt;
 
 uniform mat4  uMVP;
+uniform mat4  uModel;
 uniform float uPointSize;
 uniform mat4  uBones[60];
 uniform bool  uSkinned;
 
 out vec2 vUV;
+out vec3 vWorldPos;
 
 void main(){
     vec4 pos = vec4(aPos, 1.0);
@@ -39,6 +42,7 @@ void main(){
         }
         if (wsum > 0.001) pos = skinned / wsum;
     }
+    vWorldPos    = vec3(uModel * pos);
     gl_Position  = uMVP * pos;
     gl_PointSize = uPointSize;
     vUV = aUV;
@@ -48,15 +52,39 @@ void main(){
 static const char* FRAG_SRC = R"(
 #version 330 core
 in vec2 vUV;
+in vec3 vWorldPos;
 uniform sampler2D uTex;
 uniform bool uHasTex;
 uniform bool uWire;
+uniform bool uShowUV;
 uniform vec3 uWireCol;
 out vec4 fragColor;
+
 void main(){
-    if(uWire){ fragColor=vec4(uWireCol,1.0); return; }
-    if(uHasTex) fragColor=vec4(texture(uTex,vUV).rgb,1.0);
-    else        fragColor=vec4(0.60,0.62,0.65,1.0);
+    if(uWire)   { fragColor=vec4(uWireCol,1.0); return; }
+    if(uShowUV) { fragColor=vec4(fract(vUV.x), fract(vUV.y), 0.2, 1.0); return; }
+
+    // Reconstruct surface normal from position derivatives
+    vec3 dx  = dFdx(vWorldPos);
+    vec3 dy  = dFdy(vWorldPos);
+    vec3 N   = normalize(cross(dx, dy));
+
+    // Simple three-point lighting in world space
+    vec3 L0  = normalize(vec3( 0.6,  1.0,  0.5));  // key
+    vec3 L1  = normalize(vec3(-1.0,  0.3, -0.3));  // fill
+    vec3 L2  = normalize(vec3( 0.0, -1.0,  0.0));  // bounce
+
+    float d0 = max(dot(N, L0), 0.0);
+    float d1 = max(dot(N, L1), 0.0) * 0.4;
+    float d2 = max(dot(N, L2), 0.0) * 0.15;
+    float ambient = 0.35;
+    float light = ambient + d0 * 0.65 + d1 + d2;
+
+    vec3 base = uHasTex ? texture(uTex, vUV).rgb : vec3(0.60, 0.62, 0.65);
+    // Gamma expand: GameCube textures were authored for CRT (gamma 2.2).
+    // Without this they appear nearly black on a linear display.
+    base = pow(max(base, vec3(0.0001)), vec3(1.0 / 2.2));
+    fragColor = vec4(base * light, 1.0);
 }
 )";
 
@@ -187,20 +215,36 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
     gm->center = (mn+mx)*0.5f;
     gm->scale  = std::max(std::max(mx.x-mn.x, mx.y-mn.y), std::max(mx.z-mn.z, 1e-6f));
 
+    // Derive a fallback stem from the model filename by stripping the trailing
+    // _NNNNNNNN number (e.g. "ARMORED_THUG_00000003" → "armored_thug").
+    // Submeshes whose material names reference other characters (e.g. "jewel_thief1",
+    // "art_thief_head1") fall through to this so the registry prefix matcher
+    // resolves them to the correct numbered texture (e.g. "armored_thug_00000002").
+    std::string model_stem;
+    {
+        std::string sl = fs::path(model->filepath).stem().string();
+        std::transform(sl.begin(), sl.end(), sl.begin(), ::tolower);
+        auto pos = sl.rfind('_');
+        if (pos != std::string::npos) {
+            std::string suffix = sl.substr(pos + 1);
+            if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
+                    [](char c){ return std::isdigit((unsigned char)c); }))
+                sl = sl.substr(0, pos);
+        }
+        model_stem = sl; // e.g. "armored_thug"
+    }
+
     for (auto& sm : model->submeshes) {
         GPUMesh m;
         m.mat_name  = sm.mat_name;
         m.n_indices = (int)sm.indices.size();
-        m.tex_id    = find_texture(sm.tex_candidates.empty()
-                          ? std::vector<std::string>{sm.tex_name}
-                          : sm.tex_candidates, dir);
-        std::cerr << "[MODEL] SM" << gm->meshes.size()
-                  << " mat='" << sm.mat_name << "'"
-                  << " tex=" << (m.tex_id ? "OK" : "MISSING")
-                  << " candidates:";
-        for (auto& c : sm.tex_candidates) std::cerr << " '" << c << "'";
-        if (sm.tex_candidates.empty()) std::cerr << " '" << sm.tex_name << "'";
-        std::cerr << "\n";
+
+        // Parser candidates first, then model-stem fallback.
+        std::vector<std::string> candidates = sm.tex_candidates;
+        if (!model_stem.empty() &&
+            std::find(candidates.begin(), candidates.end(), model_stem) == candidates.end())
+            candidates.push_back(model_stem);
+        m.tex_id = find_texture(candidates, dir);
 
         // Interleave XYZ + UV
         std::vector<float> vdata;
@@ -273,11 +317,14 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     glm::mat4 T  = glm::translate(glm::mat4(1), -model->center);
     glm::mat4 Ry = glm::rotate(glm::mat4(1), model_rot_y, glm::vec3(0,1,0));
     glm::mat4 MVP = cam.proj(aspect) * cam.view() * S * Ry * T;
+    glm::mat4 M   = S * Ry * T;
 
     glUseProgram(m_shader);
-    glUniformMatrix4fv(uloc("uMVP"),1,GL_FALSE,glm::value_ptr(MVP));
+    glUniformMatrix4fv(uloc("uMVP"),  1, GL_FALSE, glm::value_ptr(MVP));
+    glUniformMatrix4fv(uloc("uModel"),1, GL_FALSE, glm::value_ptr(M));
     glUniform1i(uloc("uTex"),0);
     glUniform1i(uloc("uWire"),0);
+    glUniform1i(uloc("uShowUV"), show_uv ? 1 : 0);
     glUniform1f(uloc("uPointSize"),5.f);
     glActiveTexture(GL_TEXTURE0);
 

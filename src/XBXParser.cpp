@@ -77,6 +77,36 @@ XBXModel* parse_xbx(const std::string& filepath) {
 
     uint32_t hdr_sz    = rd<uint32_t>(d, 0x0c);
 
+    // ── Build mat_ptr → {shader, tex} from the chunk descriptor table ─────────
+    // Header 0x08 = chunk_count. Chunk table at hdr_sz, stride 12:
+    //   [type:4][desc_off:4][mat_name_ptr:4]
+    // Descriptor at desc_off (stride 0x2c = 44 bytes):
+    //   d[0]=mat_name_ptr  d[1]=shader_ptr  d[6]=tex_ptr
+    // String entries: [4-byte hash][28-byte name] — read from ptr+4.
+    // Geometry container chunks (type 0x02xxxxxx) are skipped.
+    struct MatInfo { std::string shader, tex; };
+    std::unordered_map<uint32_t, MatInfo> mat_map;
+    {
+        uint32_t n_chunks = rd<uint32_t>(d, 0x08);
+        auto read_entry = [&](uint32_t ptr) -> std::string {
+            if (ptr == 0 || ptr + 4 >= sz) return {};
+            const char* s = reinterpret_cast<const char*>(d + ptr + 4);
+            return std::string(s, strnlen(s, 28));
+        };
+        for (uint32_t ci = 0; ci < n_chunks; ++ci) {
+            uint32_t base  = hdr_sz + ci * 12;
+            if (base + 12 > sz) break;
+            uint32_t ctype = rd<uint32_t>(d, base);
+            uint32_t desc  = rd<uint32_t>(d, base + 4);
+            uint32_t matp  = rd<uint32_t>(d, base + 8);
+            if ((ctype & 0xFF000000) == 0x02000000) continue; // geometry container
+            if (desc == 0 || desc + 28 > sz || matp == 0) continue;
+            uint32_t shader_ptr = rd<uint32_t>(d, desc + 4);  // d[1]
+            uint32_t tex_ptr    = rd<uint32_t>(d, desc + 24); // d[6]
+            mat_map[matp] = { read_entry(shader_ptr), read_entry(tex_ptr) };
+        }
+    }
+
     // Locate geom_base: scan ALL chunks for the dword with tag 0x02xxxxxx,
     // geom_base is the immediately following dword + 4.
     // (2-chunk items have the sentinel in chunk[0]; 3-5 chunk characters may have it in later chunks)
@@ -145,6 +175,7 @@ XBXModel* parse_xbx(const std::string& filepath) {
     }
 
     const uint32_t STRIDE = 32;
+    std::string last_tex_name; // carry forward: used when a submesh has no texture fields
     for (uint32_t si = 0; si < sm_cnt; ++si) {
         uint32_t ptr = sm_ptrs[si];
         if (ptr + 0x60 > sz) continue;
@@ -152,70 +183,79 @@ XBXModel* parse_xbx(const std::string& filepath) {
         uint32_t mat_ptr = rd<uint32_t>(d, ptr);
         std::string mat_name = (mat_ptr+32 < sz) ? read_mat_name(d, mat_ptr) : "sub"+std::to_string(si);
 
-        // Mat struct string slots (each prefixed by 4 tag bytes):
-        //   +0x04: material/texture name (often diffuse tex, sometimes junk like "15 - default")
-        //   +0x24: shader type ("sm*", "character*", "material*") OR a real texture name
-        //   +0x44: primary texture name OR mesh instance ID (e.g. "xe_compstand000")
-        //   +0x64: secondary texture or overflow
-        //
-        // Build tex_candidates ordered best→worst; Renderer tries each until one loads.
+        // ── Resolve shader + tex from the pre-built chunk descriptor map ─────
+        // mat_map was built from the chunk table at parse start and is authoritative:
+        //   each material chunk directly encodes [mat_ptr → shader_ptr, tex_ptr].
+        // Fallback to the old fixed-offset scan for any mat_ptr not in the map
+        // (e.g. files with a different chunk layout).
+        std::string shader_type_str;
         std::string tex_name;
         std::vector<std::string> tex_candidates;
-        if (mat_ptr + 0x80 <= sz) {
-            auto read_str = [&](size_t off) -> std::string {
-                const char* s = reinterpret_cast<const char*>(d + mat_ptr + off);
-                return std::string(s, strnlen(s, 28));
-            };
-            // Engine shader-type identifiers — never a texture filename.
+
+        auto push = [&](const std::string& s) {
+            if (s.empty()) return;
+            static const char* img_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
+            std::string clean = s;
+            std::string slo = s;
+            std::transform(slo.begin(), slo.end(), slo.begin(), ::tolower);
+            for (int i = 0; img_exts[i]; ++i) {
+                size_t elen = strlen(img_exts[i]);
+                if (slo.size() > elen && slo.substr(slo.size()-elen) == img_exts[i]) {
+                    clean = s.substr(0, s.size()-elen);
+                    break;
+                }
+            }
+            if (clean.empty()) return;
+            if (std::find(tex_candidates.begin(), tex_candidates.end(), clean) == tex_candidates.end())
+                tex_candidates.push_back(clean);
+        };
+
+        auto it = mat_map.find(mat_ptr);
+        if (it != mat_map.end()) {
+            // Authoritative path: chunk descriptor table
+            shader_type_str = it->second.shader;
+            push(it->second.tex);
+        } else {
+            // Fallback: old fixed-offset scan for files not covered by chunk table
             auto is_shader = [](const std::string& s) -> bool {
-                if (s.empty()) return true;
-                if (s.rfind("sm",        0) == 0) return true;
-                if (s.rfind("character", 0) == 0) return true;
-                if (s.rfind("material",  0) == 0) return true;
+                static const char* shaders[] = {
+                    "sm_grunge", "smcharenv", "smcharenvmorph", "smfxenv",
+                    "smglass", "smgrass", "smlego", "smlegosimple",
+                    "smlowlodsimple", "smroof", "smshiny", "smsign",
+                    "smsimple", "smspidey", "smstar", "smstreet",
+                    "smtranslucent", "character", "charactermorph",
+                    nullptr
+                };
+                for (int i = 0; shaders[i]; ++i)
+                    if (s == shaders[i]) return true;
+                if (s.rfind("sm", 0) == 0)       return true;
+                if (s.rfind("material", 0) == 0)  return true;
                 return false;
             };
-            // A valid texture hint: no spaces, no slashes, no ' -' suffix junk,
-            // doesn't start with a digit, doesn't contain '#'.
             auto looks_like_tex = [](const std::string& s) -> bool {
                 if (s.empty()) return false;
                 if (std::isdigit((unsigned char)s[0])) return false;
-                for (char c : s) {
+                for (char c : s)
                     if (c == ' ' || c == '/' || c == '\\' || c == '#') return false;
-                }
                 return true;
             };
+            if (mat_ptr + 0x80 <= sz) {
+                auto read_str = [&](size_t off) -> std::string {
+                    const char* s = reinterpret_cast<const char*>(d + mat_ptr + off);
+                    return std::string(s, strnlen(s, 28));
+                };
+                std::string t04 = read_str(0x04);
+                std::string t24 = read_str(0x24);
+                std::string t44 = read_str(0x44);
+                if (is_shader(t24))                      shader_type_str = t24;
+                if (looks_like_tex(t24) && !is_shader(t24)) push(t24);
+                if (looks_like_tex(t44) && !is_shader(t44)) push(t44);
+                if (looks_like_tex(t04) && !is_shader(t04)) push(t04);
+            }
+        }
 
-            std::string t04 = read_str(0x04);
-            std::string t24 = read_str(0x24);
-            std::string t44 = read_str(0x44);
-
-            auto push = [&](const std::string& s) {
-                if (s.empty()) return;
-                // Strip image extensions — there are only .dds files on disk
-                static const char* img_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
-                std::string clean = s;
-                std::string slo = s;
-                std::transform(slo.begin(), slo.end(), slo.begin(), ::tolower);
-                for (int i = 0; img_exts[i]; ++i) {
-                    size_t elen = strlen(img_exts[i]);
-                    if (slo.size() > elen && slo.substr(slo.size()-elen) == img_exts[i]) {
-                        clean = s.substr(0, s.size()-elen);
-                        break;
-                    }
-                }
-                if (clean.empty()) return;
-                if (std::find(tex_candidates.begin(), tex_candidates.end(), clean) == tex_candidates.end())
-                    tex_candidates.push_back(clean);
-            };
-
-            // All slots filtered through looks_like_tex + is_shader.
-            // +0x64 is NOT a texture: it's the next submesh mat name (linked list) or instance ID.
-            // Priority: t24 (real tex name) → t44 (primary slot) → t04
-            if (looks_like_tex(t24) && !is_shader(t24)) push(t24);
-            if (looks_like_tex(t44) && !is_shader(t44)) push(t44);
-            if (looks_like_tex(t04) && !is_shader(t04)) push(t04);
-
-            // Digit-strip: "rhino000" → also try "rhino"
+        // Digit-strip: "rhino000" → also try "rhino"
+        {
             std::vector<std::string> stripped;
             for (const auto& c : tex_candidates) {
                 if (c.size() > 3) {
@@ -230,14 +270,14 @@ XBXModel* parse_xbx(const std::string& filepath) {
                 }
             }
             for (auto& s : stripped) push(s);
+        }
 
-            // _ifl strip: animated texture references like "sa_blg_strwal_com_ifl"
-            // → the actual DDS is the base name without "_ifl"
+        // _ifl strip: "sa_blg_strwal_com_ifl" → also try base without "_ifl"
+        {
             std::vector<std::string> ifl_stripped;
             static const std::string IFL = "_ifl";
             for (const auto& c : tex_candidates) {
-                if (c.size() > IFL.size() &&
-                    c.substr(c.size() - IFL.size()) == IFL) {
+                if (c.size() > IFL.size() && c.substr(c.size() - IFL.size()) == IFL) {
                     std::string base = c.substr(0, c.size() - IFL.size());
                     if (!base.empty() &&
                         std::find(tex_candidates.begin(), tex_candidates.end(), base) == tex_candidates.end())
@@ -245,8 +285,16 @@ XBXModel* parse_xbx(const std::string& filepath) {
                 }
             }
             for (auto& s : ifl_stripped) push(s);
+        }
 
-            tex_name = tex_candidates.empty() ? "" : tex_candidates[0];
+        tex_name = tex_candidates.empty() ? "" : tex_candidates[0];
+
+        // If still no texture, inherit from the previous submesh (e.g. smcharenvmorph face morph)
+        if (tex_candidates.empty() && !last_tex_name.empty()) {
+            tex_candidates.push_back(last_tex_name);
+            tex_name = last_tex_name;
+        } else if (!tex_candidates.empty()) {
+            last_tex_name = tex_candidates[0];
         }
 
         uint32_t vc       = rd<uint32_t>(d, ptr + 0x40);
@@ -288,6 +336,7 @@ XBXModel* parse_xbx(const std::string& filepath) {
 
         XBXSubmesh sm;
         sm.mat_name       = mat_name;
+        sm.shader_type    = shader_type_str;
         sm.tex_name       = tex_name;
         sm.tex_candidates = tex_candidates;
         sm.prim_type      = prim_type;

@@ -6,6 +6,7 @@
 
 struct XBXSubmesh {
     std::string            mat_name;
+    std::string            shader_type;    // e.g. "smsimple", "smtranslucent", "character"
     std::string            tex_name;       // best single guess (tex_candidates[0])
     std::vector<std::string> tex_candidates; // ordered: try each until one loads
     uint32_t               prim_type = 0;   // raw ptr+0x28 value from file

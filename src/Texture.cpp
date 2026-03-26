@@ -187,20 +187,38 @@ static unsigned int registry_lookup(const std::string& hint) {
         if (it != g_registry.end()) return load_texture(it->second);
     }
 
-    // Prefix match: "armored_thug" → "armored_thug_00000002", "armored_thug_alpha", etc.
-    // Use lower_bound on the sorted stems list to find candidates starting with basel + "_"
-    // Pick the shortest match (most specific base before the suffix).
+    // Prefix match with iterative suffix stripping.
+    // First try the full hint as prefix, then progressively strip trailing _segments.
+    // e.g. "sa_blg_strwal_com" -> prefix "sa_blg_strwal_com_" (no match)
+    //                          -> strip "_com" -> prefix "sa_blg_strwal_" -> finds "sa_blg_strwal04"
+    // Within each level: all-digit suffix wins (lowest number), else shortest named.
     if (!g_stems_sorted.empty()) {
-        std::string prefix = basel + "_";
-        auto it = std::lower_bound(g_stems_sorted.begin(), g_stems_sorted.end(), prefix);
-        std::string best;
-        for (; it != g_stems_sorted.end() && it->substr(0, prefix.size()) == prefix; ++it) {
-            if (best.empty() || it->size() < best.size())
-                best = *it;
-        }
-        if (!best.empty()) {
-            auto rit = g_registry.find(best);
-            if (rit != g_registry.end()) return load_texture(rit->second);
+        std::string cur = basel;
+        while (!cur.empty()) {
+            std::string prefix = cur + "_";
+            auto it = std::lower_bound(g_stems_sorted.begin(), g_stems_sorted.end(), prefix);
+            std::string best_numbered, best_named;
+            for (; it != g_stems_sorted.end() && it->substr(0, prefix.size()) == prefix; ++it) {
+                std::string suffix = it->substr(prefix.size());
+                bool all_digits = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
+                                      [](char c){ return std::isdigit((unsigned char)c); });
+                if (all_digits) {
+                    if (best_numbered.empty() || *it < best_numbered)
+                        best_numbered = *it;
+                } else {
+                    if (best_named.empty() || it->size() < best_named.size())
+                        best_named = *it;
+                }
+            }
+            std::string best = best_numbered.empty() ? best_named : best_numbered;
+            if (!best.empty()) {
+                auto rit = g_registry.find(best);
+                if (rit != g_registry.end()) return load_texture(rit->second);
+            }
+            // No match at this level -- strip last _segment and retry
+            auto pos = cur.rfind('_');
+            if (pos == std::string::npos) break;
+            cur = cur.substr(0, pos);
         }
     }
     return 0;
@@ -273,4 +291,14 @@ unsigned int find_texture(const std::vector<std::string>& hints, const std::stri
         std::cerr << "\n";
     }
     return 0;
+}
+
+void get_registry_entries(std::vector<std::pair<std::string,std::string>>& out) {
+    out.clear();
+    out.reserve(g_stems_sorted.size());
+    for (auto& stem : g_stems_sorted) {
+        auto it = g_registry.find(stem);
+        if (it != g_registry.end())
+            out.push_back({stem, it->second});
+    }
 }

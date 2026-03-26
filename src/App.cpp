@@ -10,6 +10,9 @@
 #include <filesystem>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
+#include <map>
+#include <cstring>
 #include <cmath>
 
 namespace fs = std::filesystem;
@@ -312,6 +315,15 @@ void App::try_select(double mx, double my) {
         if (best_sm >= 0) {
             m_ui_state.sel_submesh = best_sm;
             m_renderer.sel_submesh = best_sm;
+            // Update texture preview
+            if (m_gpu_model && best_sm < (int)m_gpu_model->meshes.size()) {
+                m_ui_state.preview_tex_id   = m_gpu_model->meshes[best_sm].tex_id;
+                m_ui_state.preview_tex_name = best_sm < (int)m_ui_state.submeshes.size()
+                    ? m_ui_state.submeshes[best_sm].tex_candidates.empty()
+                        ? m_ui_state.submeshes[best_sm].mat_name
+                        : m_ui_state.submeshes[best_sm].tex_candidates[0]
+                    : "";
+            }
             return;
         }
     }
@@ -521,6 +533,27 @@ void App::setup_callbacks() {
             m_ui_state.submeshes[smi].prim_method = sel==0?"TStrip":sel==1?"TList":sel==2?"QuadList":"TFan";
         rebuild_prim_override(smi, sel);
     };
+    m_ui_cb.on_tex_assign = [this](int smi, const std::string& stem) {
+        if (!m_gpu_model || smi < 0 || smi >= (int)m_gpu_model->meshes.size()) return;
+        std::string dir = fs::path(m_ui_state.files[m_ui_state.selected]).parent_path().string();
+        unsigned int tid = find_texture(stem, dir);
+        m_gpu_model->meshes[smi].tex_id = tid;
+        if (smi < (int)m_ui_state.submeshes.size())
+            m_ui_state.submeshes[smi].has_tex = tid != 0;
+        std::cerr << "[MATASSIGN] SM" << smi << " -> '" << stem << "' " << (tid?"OK":"MISS") << "\n";
+    };
+    m_ui_cb.on_tex_override = [this](int smi, int sel) {
+        if (!m_gpu_model) return;
+        if (smi < 0 || smi >= (int)m_ui_state.submeshes.size()) return;
+        auto& si = m_ui_state.submeshes[smi];
+        if (sel < 0 || sel >= (int)si.tex_candidates.size()) return;
+        std::string dir = fs::path(m_ui_state.files[m_ui_state.selected]).parent_path().string();
+        unsigned int tid = find_texture(si.tex_candidates[sel], dir);
+        m_gpu_model->meshes[smi].tex_id = tid;
+        si.has_tex = tid != 0;
+        std::cerr << "[TEXOV] SM" << smi << " -> '" << si.tex_candidates[sel]
+                  << "' " << (tid ? "OK" : "MISS") << "\n";
+    };
     m_ui_cb.on_play_anim    = [this](){
         if (m_anim_sel<0) return;
         m_anim_play = !m_anim_play;
@@ -548,6 +581,111 @@ void App::scan_folder(const std::string& folder) {
 
     // Build global texture registry for cross-pack resolution
     build_tex_registry(folder);
+    get_registry_entries(m_ui_state.all_tex_entries);
+
+    // ── Mat string frequency report ───────────────────────────────────────────
+    {
+        struct SMInfo {
+            std::string file;
+            int         sm;
+            std::string mat_name;   // +0x04
+            std::string shader;     // +0x24
+            std::string tex_name;   // +0x44
+        };
+        // tex_name → list of occurrences (only tex_name needs deduplication count)
+        std::map<std::string, std::vector<SMInfo>> by_tex;
+
+        auto rd32l = [](const uint8_t* d, size_t o) -> uint32_t {
+            uint32_t v; memcpy(&v, d+o, 4); return v;
+        };
+        auto rdstr = [](const uint8_t* d, size_t o, size_t sz, int n=28) -> std::string {
+            if (o+1 > sz) return {};
+            size_t avail = std::min((size_t)n, sz-o);
+            const char* s = reinterpret_cast<const char*>(d+o);
+            size_t len = strnlen(s, avail);
+            // reject binary garbage
+            int printable = 0;
+            for (size_t i=0;i<len;++i) if ((unsigned char)s[i]>=32&&(unsigned char)s[i]<127) ++printable;
+            if (len > 0 && printable < (int)len/2) return {};
+            return std::string(s, len);
+        };
+
+        for (auto& path : m_ui_state.files) {
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            if (!f) continue;
+            size_t sz = f.tellg(); f.seekg(0);
+            if (sz < 16) continue;
+            std::vector<uint8_t> buf(sz);
+            f.read(reinterpret_cast<char*>(buf.data()), sz);
+            const uint8_t* d = buf.data();
+            if (memcmp(d, "XBXM", 4) != 0) continue;
+
+            uint32_t chunk_cnt = rd32l(d, 0x08);
+            uint32_t hdr_sz    = rd32l(d, 0x0c);
+            uint32_t geom_base = 0;
+            for (uint32_t ci = 0; ci < chunk_cnt && !geom_base; ++ci) {
+                uint32_t base = hdr_sz + ci*0x30;
+                if (base+48 > sz) break;
+                for (uint32_t i = 0; i < 12; ++i) {
+                    uint32_t v = rd32l(d, base+i*4);
+                    if ((v & 0xFF000000) == 0x02000000 && i+1 < 12) {
+                        geom_base = rd32l(d, base+(i+1)*4)+4; break;
+                    }
+                }
+            }
+            if (!geom_base || geom_base+0x48 > sz) continue;
+            uint32_t sm_cnt = rd32l(d, geom_base+0x04);
+            if (sm_cnt == 0 || sm_cnt > 64) continue;
+
+            std::string shortpath = (fs::path(path).parent_path().filename()
+                                   / fs::path(path).filename()).string();
+
+            for (uint32_t si = 0; si < sm_cnt; ++si) {
+                uint32_t ptr = rd32l(d, geom_base+0x40+si*8);
+                if (ptr+0x60 > sz) continue;
+                uint32_t mat_ptr = rd32l(d, ptr);
+                if (mat_ptr+0x50 > sz) continue;
+
+                std::string mat  = rdstr(d, mat_ptr+0x04, sz);
+                std::string shdr = rdstr(d, mat_ptr+0x24, sz);
+                std::string tex  = rdstr(d, mat_ptr+0x44, sz);
+
+                // key by tex_name (empty tex goes under "")
+                by_tex[tex].push_back({shortpath, (int)si, mat, shdr, tex});
+            }
+        }
+
+        // key by shader (+0x24), sorted by count desc
+        std::map<std::string, std::vector<SMInfo>> by_shader;
+        for (auto& [k,v] : by_tex)
+            for (auto& loc : v)
+                by_shader[loc.shader].push_back(loc);
+
+        std::vector<std::pair<std::string,std::vector<SMInfo>>> multi;
+        for (auto& [k,v] : by_shader) if (v.size() > 1) multi.push_back({k,v});
+        std::sort(multi.begin(), multi.end(),
+            [](auto& a, auto& b){ return a.second.size() > b.second.size(); });
+
+        std::ofstream out("mat_strings_report.txt");
+        if (out) {
+            out << "XBX Mat/Shader/Texture Report\n";
+            out << "Root: " << folder << "\n";
+            out << "Files: " << m_ui_state.files.size() << "\n";
+            out << "Shader types appearing >1 time: " << multi.size() << "\n";
+            out << std::string(72,'=') << "\n\n";
+            for (auto& [shader, locs] : multi) {
+                out << "SHADER: \"" << shader << "\"  x" << locs.size() << "\n";
+                for (auto& loc : locs)
+                    out << "  SM" << loc.sm
+                        << "  mat=\""  << loc.mat_name << "\""
+                        << "  tex=\""  << loc.tex_name << "\""
+                        << "  " << loc.file << "\n";
+                out << "\n";
+            }
+            std::cout << "[SCAN] mat_strings_report.txt written (" << multi.size() << " shader types)\n";
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Scan for animations in same folder
     load_animations(folder);
@@ -584,6 +722,8 @@ void App::load_file(int idx) {
     m_ui_state.submeshes.clear();
     m_ui_state.sel_submesh = -1;
     m_renderer.sel_submesh = -1;
+    m_ui_state.preview_tex_id = 0;
+    m_ui_state.preview_tex_name.clear();
     for (int i=0;i<(int)model->submeshes.size();++i) {
         auto& sm = model->submeshes[i];
         m_cached_raw[i].raw       = sm.raw_indices;
@@ -600,12 +740,15 @@ void App::load_file(int idx) {
         if (default_sel == 2) method_label = "QuadList";
 
         SubmeshInfo si;
-        si.mat_name    = sm.mat_name;
-        si.tri_count   = (int)sm.indices.size()/3;
-        si.prim_raw    = sm.prim_type;
-        si.prim_method = method_label;
-        si.has_tex     = m_gpu_model->meshes[i].tex_id != 0;
-        si.method_sel  = default_sel;
+        si.mat_name      = sm.mat_name;
+        si.shader_type   = sm.shader_type;
+        si.tex_candidates = sm.tex_candidates;
+        si.tex_sel       = 0;
+        si.tri_count     = (int)sm.indices.size()/3;
+        si.prim_raw      = sm.prim_type;
+        si.prim_method   = method_label;
+        si.has_tex       = m_gpu_model->meshes[i].tex_id != 0;
+        si.method_sel    = default_sel;
         m_ui_state.submeshes.push_back(si);
     }
 
@@ -660,7 +803,8 @@ void App::run() {
 
         m_renderer.sel_submesh = m_ui_state.sel_submesh;
         m_ui.draw(m_ui_state,m_ui_cb,
-                  m_renderer.wireframe,m_renderer.show_grid,m_renderer.show_skel,m_h);
+                  m_renderer.wireframe,m_renderer.show_grid,m_renderer.show_skel,
+                  m_renderer.show_uv,m_h);
 
         // Rotation HUD
         if (m_rot_mode) {
