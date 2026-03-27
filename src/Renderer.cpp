@@ -405,30 +405,65 @@ void Renderer::draw_world_instances(const Camera& cam, int vp_x, int vp_w, int v
     float aspect = (float)vp_w / (float)std::max(vp_h, 1);
     glm::mat4 VP = cam.proj(aspect) * cam.view();
 
+    // Extract frustum planes from VP for culling (6 planes, world space)
+    // Gribb/Hartmann method
+    glm::mat4 VPt = glm::transpose(VP);
+    glm::vec4 planes[6] = {
+        VPt[3] + VPt[0], // left
+        VPt[3] - VPt[0], // right
+        VPt[3] + VPt[1], // bottom
+        VPt[3] - VPt[1], // top
+        VPt[3] + VPt[2], // near
+        VPt[3] - VPt[2], // far
+    };
+    // Normalise just the xyz for distance test
+    for (auto& p : planes) {
+        float len = glm::length(glm::vec3(p));
+        if (len > 0.f) p /= len;
+    }
+
+    auto in_frustum = [&](glm::vec3 pos, float radius) {
+        for (auto& p : planes)
+            if (p.x*pos.x + p.y*pos.y + p.z*pos.z + p.w < -radius)
+                return false;
+        return true;
+    };
+
     glUseProgram(m_shader);
     glUniform1i(uloc("uTex"),     0);
     glUniform1i(uloc("uWire"),    0);
     glUniform1i(uloc("uShowUV"),  0);
-    glUniform1i(uloc("uSkinned"), 0);  // world instances are unskinned
+    glUniform1i(uloc("uSkinned"), 0);
     glUniform1f(uloc("uPointSize"), 1.f);
 
-    // Identity bones — uploaded once, shared by all instances
-    static const glm::mat4 ID(1.f);
+    // Identity bones uploaded once
     static glm::mat4 id_bones[60];
     static bool id_init = false;
-    if (!id_init) { for (auto& m : id_bones) m = ID; id_init = true; }
+    if (!id_init) { for (auto& m : id_bones) m = glm::mat4(1.f); id_init = true; }
     glUniformMatrix4fv(uloc("uBones"), 60, GL_FALSE, glm::value_ptr(id_bones[0]));
 
     glActiveTexture(GL_TEXTURE0);
 
+    unsigned int last_tex = ~0u;
+    int drawn = 0, culled = 0;
     for (auto& [model, xform] : instances) {
         if (!model) continue;
+
+        // Frustum cull: bounding sphere from xform translation + model scale
+        glm::vec3 pos = glm::vec3(xform[3]);
+        float radius  = model->scale * 2.0f; // conservative
+        if (!in_frustum(pos, radius)) { ++culled; continue; }
+        ++drawn;
         glm::mat4 MVP = VP * xform;
         glUniformMatrix4fv(uloc("uMVP"),   1, GL_FALSE, glm::value_ptr(MVP));
         glUniformMatrix4fv(uloc("uModel"), 1, GL_FALSE, glm::value_ptr(xform));
 
         for (auto& mesh : model->meshes) {
             glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
+            if (mesh.tex_id != last_tex) {
+                glBindTexture(GL_TEXTURE_2D, mesh.tex_id);
+                last_tex = mesh.tex_id;
+            }
             mesh.draw();
         }
 

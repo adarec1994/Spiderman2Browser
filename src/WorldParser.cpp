@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <map>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -103,7 +104,8 @@ WorldData* parse_world(const std::string& path) {
         if (memcmp(d + i, MARKER, 4) != 0) continue;
         size_t rec = i;
         std::string name = rstr(d, sz, rec + 0x10, 32);
-        if (name.empty() || name[0] < 'A' || name[0] > 'Z') continue;
+        if (name.empty() || !std::isalpha((unsigned char)name[0])) continue;
+        { bool ok = true; for (char ch : name) if (!std::isalnum((unsigned char)ch) && ch != '_') { ok=false; break; } if (!ok) continue; }
         size_t mat_off = find_transform(d, sz, rec + 0xa0, 0x180);
         if (mat_off == 0) continue;
         float m[16];
@@ -118,47 +120,79 @@ WorldData* parse_world(const std::string& path) {
     }
 
     // ── Prop type table: runs of [4B hash][28B lowercase_name] ───────────────
+    // Prop type table: entries of [hash(4)+name(28)], stride 32.
+    // Real prop names END in digits: "sg_stor_15d000", "s_strtlampb000" etc.
+    // Find the LARGEST such run to avoid false positives.
     size_t prop_table_off   = 0;
     int    prop_table_count = 0;
     for (size_t i = 32; i + 64 <= sz; i += 4) {
         int count = 0;
         size_t off = i;
-        while (off + 32 <= sz && count < 64) {
+        while (off + 32 <= sz && count < 256) {
             uint8_t c0 = d[off + 4];
             if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'))) break;
             std::string s = rstr(d, sz, off + 4, 28);
             if (s.size() < 4) break;
-            if (s.find_first_of("0123456789") == std::string::npos) break;
+            // Must end in at least one digit (real asset names: "sg_stor_15d000")
+            if (!std::isdigit((unsigned char)s.back())) break;
             if (s.find('_') == std::string::npos) break;
             ++count; off += 32;
         }
-        if (count >= 4 && count <= 64) {
+        if (count > prop_table_count) {
             prop_table_off   = i;
             prop_table_count = count;
-            break;
         }
     }
 
     if (prop_table_count > 0) {
+        // The combined run includes both the sc_/c21_ detail table AND the trailing
+        // blg*/apt* building table.  Placement records index into the BUILDING table only.
+        // Extract that sub-table (entries whose names start with "blg" or "apt").
+        size_t blg_table_off   = 0;
+        int    blg_table_count = 0;
         for (int i = 0; i < prop_table_count; ++i) {
-            size_t off = prop_table_off + i * 32;
-            wd->prop_types.push_back(rstr(d, sz, off + 4, 28));
+            size_t off = prop_table_off + i * 32 + 4;
+            std::string s = rstr(d, sz, off, 28);
+            if (s.size() >= 3 && (s.substr(0,3) == "blg" || s.substr(0,3) == "apt")) {
+                if (blg_table_off == 0) blg_table_off = prop_table_off + i * 32;
+                ++blg_table_count;
+            }
         }
 
-        // ── Placement records: [u8 flags=0x09][u8 type_idx][u16 yaw_deg][f32 x][f32 y][f32 z]
-        const size_t STRIDE    = 0x34;
-        size_t       scan_start = prop_table_off + prop_table_count * 32;
+        // Fall back to the full combined table if no blg/apt sub-table found
+        if (blg_table_count == 0) {
+            blg_table_off   = prop_table_off;
+            blg_table_count = prop_table_count;
+        }
+
+        for (int i = 0; i < blg_table_count; ++i)
+            wd->prop_types.push_back(rstr(d, sz, blg_table_off + i * 32 + 4, 28));
+
+        // Placement records start after the full combined table.
+        // Layout: [...][type_idx u8][0x09 u8][pad u8][yaw_lo u8][yaw_hi u8... no:
+        // actual: d[off-1]=type_idx, d[off]=0x09, d[off+2..3]=yaw LE u16, d[off+4/8/12]=x/y/z
+        const size_t STRIDE     = 0x34;
+        const size_t scan_start = prop_table_off + prop_table_count * 32;
+
+        std::map<int,int> tidx_hist;
         for (size_t off = scan_start; off + STRIDE <= sz; off += 4) {
+            if (off < 1) continue;
             if (d[off] != 0x09) continue;
-            uint8_t  type_idx = d[off + 1];
-            if (type_idx >= (uint8_t)prop_table_count) continue;
+            uint8_t type_idx = d[off - 1];
+            if (type_idx >= (uint8_t)blg_table_count) continue;
             uint16_t yaw_raw = rh(d, off + 2);
             if (yaw_raw > 359) continue;
             float x = rf(d, off + 4), y = rf(d, off + 8), z = rf(d, off + 12);
             if (!plausible_world(x) || !plausible_world(y) || !plausible_world(z)) continue;
             if (std::fabs(x) + std::fabs(z) < 10.f) continue;
+            tidx_hist[(int)type_idx]++;
             wd->props.push_back({ (int)type_idx, (float)yaw_raw, x, y, z });
             off += STRIDE - 4;
+        }
+        if (!tidx_hist.empty()) {
+            std::cout << "[PROP_TIDX] type_idx distribution (" << path.substr(path.rfind('/')+1) << "):\n";
+            for (auto& [k,v] : tidx_hist)
+                std::cout << "  idx=" << k << " (" << wd->prop_types[k] << ") x" << v << "\n";
         }
     }
 

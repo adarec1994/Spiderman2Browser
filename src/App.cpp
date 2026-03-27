@@ -2,6 +2,7 @@
 #include "Texture.h"
 #include "WorldParser.h"
 #include <glad/glad.h>
+#include <fstream>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -761,6 +762,66 @@ void App::scan_folder(const std::string& folder) {
                 m_xbx_registry[stem] = entry.path().string();
         }
         std::cout << "[XBX_REG] " << m_xbx_registry.size() << " XBX files indexed\n";
+
+        // Build base index: strip trailing digits/underscore-digits from each stem
+        // so lookups like "s_trfflitea" instantly find "s_trfflitea_00000001"
+        m_xbx_base_index.clear();
+        for (auto& [stem, path] : m_xbx_registry) {
+            // Pattern A: base_00000001 -> base
+            std::string base = stem;
+            if (base.size() > 9) {
+                std::string tail = base.substr(base.size() - 9);
+                if (tail[0] == '_' && std::all_of(tail.begin()+1, tail.end(), ::isdigit))
+                    base = base.substr(0, base.size() - 9);
+            }
+            // Pattern B: base000 -> base (trailing digits only)
+            if (base == stem) {
+                while (!base.empty() && std::isdigit((unsigned char)base.back()))
+                    base.pop_back();
+            }
+            if (base != stem && base.size() >= 3) {
+                // keep the lexicographically smallest stem for each base
+                auto it = m_xbx_base_index.find(base);
+                if (it == m_xbx_base_index.end() || stem < it->second)
+                    m_xbx_base_index[base] = stem;
+            }
+        }
+        std::cout << "[XBX_REG] base index: " << m_xbx_base_index.size() << " entries\n";
+
+        // Build suffix index: for each stem, index every underscore-split suffix
+        // so "s_strtlampb_00000001" is findable via "strtlampb"
+        m_xbx_suffix_index.clear();
+        for (auto& [stem, path] : m_xbx_registry) {
+            std::string s = stem;
+            while (!s.empty()) {
+                // strip trailing digits and underscores to get base suffix
+                std::string base = s;
+                while (!base.empty() && (std::isdigit((unsigned char)base.back()) || base.back() == '_'))
+                    base.pop_back();
+                if (base.size() >= 4 && m_xbx_suffix_index.find(base) == m_xbx_suffix_index.end())
+                    m_xbx_suffix_index[base] = stem;
+                auto us = s.find('_');
+                if (us == std::string::npos) break;
+                s = s.substr(us + 1);
+            }
+        }
+        std::cout << "[XBX_REG] suffix index: " << m_xbx_suffix_index.size() << " entries\n";
+
+        // Dump all XBX stems to a text file alongside the exe
+        {
+            std::ofstream out("xbx_mesh_list.txt");
+            if (out) {
+                std::vector<std::string> stems;
+                stems.reserve(m_xbx_registry.size());
+                for (auto& [stem, path] : m_xbx_registry)
+                    stems.push_back(stem);
+                std::sort(stems.begin(), stems.end());
+                for (auto& s : stems)
+                    out << s << "\n";
+                std::cout << "[XBX_REG] wrote xbx_mesh_list.txt ("
+                          << stems.size() << " entries)\n";
+            }
+        }
     }
 }
 
@@ -784,10 +845,20 @@ void App::clear_world() {
 
 GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
     if (asset_name.empty()) return nullptr;
+
+    // Garbage filter: real names are ALL-CAPS or all-lowercase. Binary junk is mixed (e.g. "h4bC").
+    {
+        bool has_upper = false, has_lower = false;
+        for (char ch : asset_name) {
+            if (std::isupper((unsigned char)ch)) has_upper = true;
+            if (std::islower((unsigned char)ch)) has_lower = true;
+        }
+        if (has_upper && has_lower) return nullptr;
+    }
+
     std::string key = asset_name;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    // Check cache first
     auto it = m_world_gpu_cache.find(key);
     if (it != m_world_gpu_cache.end()) return it->second;
 
@@ -795,63 +866,78 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
         auto rit = m_xbx_registry.find(stem);
         if (rit == m_xbx_registry.end()) return nullptr;
         XBXModel* xm = parse_xbx(rit->second);
-        if (!xm) return nullptr;
+        if (!xm) {
+            std::cout << "[PARSE_FAIL] " << stem << " @ " << rit->second << "\n";
+            return nullptr;
+        }
         GPUModel* gm = m_renderer.upload_model(xm);
         delete xm;
         return gm;
     };
 
-    // For a given stem, try:
-    //   1. exact match in registry
-    //   2. strip trailing digits -> exact match  ("s_manholeb03" -> "s_manholeb")
-    //   3. strip trailing digits -> find lowest base+digits variant ("s_manholeb" -> "s_manholeb000")
-    // Minimum base length of 4 to avoid false matches on short strings.
     auto try_stem = [&](const std::string& stem) -> GPUModel* {
-        if (stem.size() < 2) return nullptr;
+        if (stem.size() < 3) return nullptr;
+
+        // 1. exact
         if (auto* gm = try_load(stem)) return gm;
 
-        // strip trailing digits
+        // strip trailing digits and underscores to get base
         std::string base = stem;
-        while (!base.empty() && std::isdigit((unsigned char)base.back()))
+        while (!base.empty() && (std::isdigit((unsigned char)base.back()) || base.back() == '_'))
             base.pop_back();
+        if (base.empty() || base.size() < 3) return nullptr;
 
-        if (base.size() < 4) return nullptr;
-
+        // 2. base exact  (sg_stor_15d000 -> sg_stor_15d)
         if (base != stem)
             if (auto* gm = try_load(base)) return gm;
 
-        // find lowest numbered variant
-        std::string best;
-        for (auto& [k, p] : m_xbx_registry) {
-            if (k.size() <= base.size()) continue;
-            if (k.rfind(base, 0) != 0) continue;
-            std::string tail = k.substr(base.size());
-            if (tail.empty() || !std::all_of(tail.begin(), tail.end(), ::isdigit)) continue;
-            if (best.empty() || k < best) best = k;
+        // 3. base index O(1)
+        {
+            auto bi = m_xbx_base_index.find(base);
+            if (bi != m_xbx_base_index.end())
+                if (auto* gm = try_load(bi->second)) return gm;
         }
-        if (!best.empty())
-            if (auto* gm = try_load(best)) return gm;
+
+        // 4. suffix index - only for long-enough bases to avoid false matches
+        //    (min 8 chars: strtlampb=9, rfaccessa=9, indroofc=8, trfflitea=9)
+        //    (blocked: helipad=7, tanka=5 etc.)
+        if (base.size() >= 8) {
+            // exact suffix index hit
+            auto si = m_xbx_suffix_index.find(base);
+            if (si != m_xbx_suffix_index.end())
+                if (auto* gm = try_load(si->second)) return gm;
+
+            // prefix scan within suffix index (trfflite -> trfflitea, trffliteb...)
+            // suffix_index is small (~5k entries) so this is fast
+            for (auto& [k, v] : m_xbx_suffix_index) {
+                if (k.size() > base.size() && k.rfind(base, 0) == 0)
+                    if (auto* gm = try_load(v)) return gm;
+            }
+        }
 
         return nullptr;
     };
 
-    // Walk underscore-split suffixes, but only up to 3 levels deep.
-    // "ent_b10_s_manholeb03" -> "b10_s_manholeb03" -> "s_manholeb03" -> found
-    // Stop early to avoid matching garbage from very short suffixes.
+    // Walk underscore-split suffixes longest first, max 4 strips
     std::string cur = key;
-    int depth = 0;
-    while (!cur.empty() && depth < 6) {
+    int strips = 0;
+    while (!cur.empty() && strips <= 4) {
         if (auto* gm = try_stem(cur)) { m_world_gpu_cache[key] = gm; return gm; }
         auto us = cur.find('_');
         if (us == std::string::npos) break;
         cur = cur.substr(us + 1);
-        ++depth;
+        ++strips;
     }
 
     m_world_gpu_cache[key] = nullptr;
     std::cout << "[WORLD_MISS] " << asset_name << "\n";
     return nullptr;
 }
+
+
+
+
+
 
 
 
@@ -865,10 +951,13 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
 //   final = world_xform * translate(center) * scale(scale_factor)
 // This maps stored vertices back to local space, then into the world.
 void App::build_world_draws(const WorldData& wd) {
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s;
+    };
+
     for (auto& inst : wd.instances) {
         GPUModel* gm = world_get_or_load_model(inst.asset_name);
         if (!gm) continue;
-        // Vertices are in model-local space; inst.transform places them in world space.
         m_world_draws.push_back({ gm, inst.transform });
     }
     for (auto& prop : wd.props) {
@@ -879,6 +968,20 @@ void App::build_world_draws(const WorldData& wd) {
         glm::mat4 xf = glm::translate(glm::mat4(1.f), glm::vec3(prop.x, prop.y, prop.z));
         xf = glm::rotate(xf, yr, glm::vec3(0.f, 1.f, 0.f));
         m_world_draws.push_back({ gm, xf });
+    }
+
+    // Debug: show what each name resolved to
+    std::cout << "[BUILD] prop_types->resolved:\n";
+    for (auto& pt : wd.prop_types) {
+        auto it = m_world_gpu_cache.find(lower(pt));
+        bool hit = (it != m_world_gpu_cache.end() && it->second);
+        std::cout << "  " << pt << " -> " << (hit ? lower(pt) : "MISS") << "\n";
+    }
+    std::cout << "[BUILD] instances->resolved:\n";
+    for (auto& inst : wd.instances) {
+        auto it = m_world_gpu_cache.find(lower(inst.asset_name));
+        bool hit = (it != m_world_gpu_cache.end() && it->second);
+        std::cout << "  " << inst.asset_name << " -> " << (hit ? lower(inst.asset_name) : "MISS") << "\n";
     }
 }
 
@@ -917,7 +1020,9 @@ void App::load_sector_terrain(const std::string& dat_path) {
     std::string key  = stem;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
+    // Try stem then stem+"r" (terrain XBX is always named {sector}r)
     GPUModel* gm = world_get_or_load_model(key);
+    if (!gm) gm = world_get_or_load_model(key + "r");
     if (gm) {
         m_world_draws.push_back({ gm, glm::mat4(1.f) });
         std::cout << "[TERRAIN] loaded " << stem << "\n";

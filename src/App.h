@@ -86,6 +86,12 @@ private:
     // ── World / area ──────────────────────────────────────────────────────────
     std::unordered_map<std::string, GPUModel*>   m_world_gpu_cache;
     std::unordered_map<std::string, std::string> m_xbx_registry;
+    // base stem -> first full stem (for O(1) base+digits lookup)
+    // e.g. "s_trfflitea" -> "s_trfflitea_00000001"
+    std::unordered_map<std::string, std::string> m_xbx_base_index;
+    // underscore-suffix -> best matching stem
+    // e.g. "strtlampb" -> "s_strtlampb_00000001"
+    std::unordered_map<std::string, std::string> m_xbx_suffix_index;
 
     struct WorldDrawCall { GPUModel* model; glm::mat4 xform; };
     std::vector<WorldDrawCall> m_world_draws;

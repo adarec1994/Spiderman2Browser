@@ -112,6 +112,6 @@ void Camera::fly_move(float dt, unsigned keys) {
 
 void Camera::fly_look(float dx, float dy) {
     if (!fly) return;
-    yaw   += dx * 0.15f;
+    yaw   -= dx * 0.15f;
     pitch  = glm::clamp(pitch - dy * 0.15f, -89.f, 89.f);
 }
