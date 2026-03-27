@@ -1,5 +1,6 @@
 #include "App.h"
 #include "Texture.h"
+#include "WorldParser.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
@@ -445,20 +446,33 @@ void App::cb_mouse_btn(GLFWwindow*, int btn, int action, int) {
         if (btn == GLFW_MOUSE_BUTTON_LEFT) {
             if (g_app->m_rot_mode) g_app->confirm_rotate();
             else if (in_vp) {
-                g_app->try_select(mx,my);
+                if (!g_app->m_world_mode) g_app->try_select(mx,my);
                 g_app->m_drag_l=true; g_app->m_lx=mx; g_app->m_ly=my;
             }
         }
         if (btn == GLFW_MOUSE_BUTTON_RIGHT && in_vp) {
-            if (g_app->m_rot_mode) g_app->cancel_rotate();
-            else { g_app->m_drag_r=true; g_app->m_lx=mx; g_app->m_ly=my; }
+            if (g_app->m_rot_mode) { g_app->cancel_rotate(); }
+            else if (g_app->m_world_mode && g_app->m_cam.fly) {
+                // RMB in world/fly mode = mouse-look; capture cursor
+                g_app->m_fly_look = true;
+                g_app->m_lx = mx; g_app->m_ly = my;
+                glfwSetInputMode(g_app->m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            } else {
+                g_app->m_drag_r=true; g_app->m_lx=mx; g_app->m_ly=my;
+            }
         }
         if (btn == GLFW_MOUSE_BUTTON_MIDDLE && in_vp) {
             g_app->m_drag_l=true; g_app->m_lx=mx; g_app->m_ly=my;
         }
     } else {
         if (btn==GLFW_MOUSE_BUTTON_LEFT||btn==GLFW_MOUSE_BUTTON_MIDDLE) g_app->m_drag_l=false;
-        if (btn==GLFW_MOUSE_BUTTON_RIGHT)                                g_app->m_drag_r=false;
+        if (btn==GLFW_MOUSE_BUTTON_RIGHT) {
+            g_app->m_drag_r=false;
+            if (g_app->m_fly_look) {
+                g_app->m_fly_look = false;
+                glfwSetInputMode(g_app->m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+        }
     }
 }
 
@@ -467,6 +481,7 @@ void App::cb_cursor(GLFWwindow*, double mx, double my) {
     double dx=mx-g_app->m_lx, dy=my-g_app->m_ly;
     g_app->m_lx=mx; g_app->m_ly=my;
     if (g_app->m_rot_mode) { g_app->update_rotate(mx); return; }
+    if (g_app->m_fly_look) { g_app->m_cam.fly_look((float)dx,(float)dy); return; }
     if (g_app->m_drag_l)   g_app->m_cam.orbit((float)dx,(float)dy);
     if (g_app->m_drag_r)   g_app->m_cam.do_pan((float)dx,(float)dy);
 }
@@ -560,6 +575,11 @@ void App::setup_callbacks() {
         m_ui_state.anim_playing = m_anim_play;
         m_last_frame = glfwGetTime();
     };
+    m_ui_cb.on_load_world_file = [this](int i){
+        if (i >= 0 && i < (int)m_ui_state.world_files.size())
+            load_world(m_ui_state.world_files[i]);
+    };
+    m_ui_cb.on_load_all_worlds = [this](){ load_all_worlds(); };
 }
 
 // ── Scan + Load ───────────────────────────────────────────────────────────────
@@ -689,12 +709,306 @@ void App::scan_folder(const std::string& folder) {
 
     // Scan for animations in same folder
     load_animations(folder);
+
+    // ── World .dat files: bare stem (no _NNNNNNNN suffix) ────────────────────
+    m_ui_state.world_files.clear();
+    {
+        std::error_code ecw;
+        for (auto& entry : fs::recursive_directory_iterator(folder, ecw)) {
+            if (ecw) { ecw.clear(); continue; }
+            if (!entry.is_regular_file()) continue;
+            auto p = entry.path();
+            std::string ext = p.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".dat") continue;
+            std::string stem = p.stem().string();
+            // World area files have cell-ID stems: 1-3 uppercase letters + 2-3 digits
+            // + optional trailing letter (e.g. A01, F48, G60, A01R, C22I01).
+            // Everything else (ARMORED_THUG, BLACK_CAT, BCRUN, etc.) is excluded.
+            {
+                // Must have no underscore and match [A-Z]{1,3}[0-9]{2,3}[A-Z]?
+                if (stem.find('_') != std::string::npos) continue;
+                size_t i = 0;
+                // 1-3 leading letters
+                while (i < stem.size() && std::isupper((unsigned char)stem[i])) ++i;
+                if (i < 1 || i > 3) continue;
+                size_t alpha_end = i;
+                // 2-3 digits
+                while (i < stem.size() && std::isdigit((unsigned char)stem[i])) ++i;
+                if (i - alpha_end < 2 || i - alpha_end > 3) continue;
+                // optional trailing letter(s)
+                while (i < stem.size() && std::isupper((unsigned char)stem[i])) ++i;
+                if (i != stem.size()) continue; // unexpected chars
+            }
+            m_ui_state.world_files.push_back(p.string());
+        }
+        std::sort(m_ui_state.world_files.begin(), m_ui_state.world_files.end());
+        std::cout << "[WORLD_SCAN] " << m_ui_state.world_files.size() << " world dat files\n";
+    }
+
+    // ── XBX registry: lowercase_stem → absolute_path ─────────────────────────
+    m_xbx_registry.clear();
+    {
+        std::error_code ecx;
+        for (auto& entry : fs::recursive_directory_iterator(folder, ecx)) {
+            if (ecx) { ecx.clear(); continue; }
+            if (!entry.is_regular_file()) continue;
+            std::string fnl = entry.path().filename().string();
+            std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+            if (fs::path(fnl).extension() != ".xbx") continue;
+            std::string stem = fs::path(fnl).stem().string();
+            if (m_xbx_registry.find(stem) == m_xbx_registry.end())
+                m_xbx_registry[stem] = entry.path().string();
+        }
+        std::cout << "[XBX_REG] " << m_xbx_registry.size() << " XBX files indexed\n";
+    }
+}
+
+// ── World loading ─────────────────────────────────────────────────────────────
+
+void App::clear_world() {
+    for (auto& [k, gm] : m_world_gpu_cache) { if (gm) { gm->release(); delete gm; } }
+    m_world_gpu_cache.clear();
+    m_world_draws.clear();
+    m_world_mode = false;
+    m_cam.fly    = false;    // restore orbit camera
+    m_fly_look   = false;
+    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    m_ui_state.world_mode            = false;
+    m_ui_state.world_instance_count  = 0;
+    m_ui_state.world_prop_count      = 0;
+    m_ui_state.world_dat_path        = {};
+    m_ui_state.world_load_progress   = -1.f;
+    m_ui_state.world_load_status     = {};
+}
+
+GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
+    if (asset_name.empty()) return nullptr;
+    std::string key = asset_name;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    // Check cache first
+    auto it = m_world_gpu_cache.find(key);
+    if (it != m_world_gpu_cache.end()) return it->second;
+
+    auto try_load = [&](const std::string& stem) -> GPUModel* {
+        auto rit = m_xbx_registry.find(stem);
+        if (rit == m_xbx_registry.end()) return nullptr;
+        XBXModel* xm = parse_xbx(rit->second);
+        if (!xm) return nullptr;
+        GPUModel* gm = m_renderer.upload_model(xm);
+        delete xm;
+        return gm;
+    };
+
+    // For a given stem, try:
+    //   1. exact match in registry
+    //   2. strip trailing digits -> exact match  ("s_manholeb03" -> "s_manholeb")
+    //   3. strip trailing digits -> find lowest base+digits variant ("s_manholeb" -> "s_manholeb000")
+    // Minimum base length of 4 to avoid false matches on short strings.
+    auto try_stem = [&](const std::string& stem) -> GPUModel* {
+        if (stem.size() < 2) return nullptr;
+        if (auto* gm = try_load(stem)) return gm;
+
+        // strip trailing digits
+        std::string base = stem;
+        while (!base.empty() && std::isdigit((unsigned char)base.back()))
+            base.pop_back();
+
+        if (base.size() < 4) return nullptr;
+
+        if (base != stem)
+            if (auto* gm = try_load(base)) return gm;
+
+        // find lowest numbered variant
+        std::string best;
+        for (auto& [k, p] : m_xbx_registry) {
+            if (k.size() <= base.size()) continue;
+            if (k.rfind(base, 0) != 0) continue;
+            std::string tail = k.substr(base.size());
+            if (tail.empty() || !std::all_of(tail.begin(), tail.end(), ::isdigit)) continue;
+            if (best.empty() || k < best) best = k;
+        }
+        if (!best.empty())
+            if (auto* gm = try_load(best)) return gm;
+
+        return nullptr;
+    };
+
+    // Walk underscore-split suffixes, but only up to 3 levels deep.
+    // "ent_b10_s_manholeb03" -> "b10_s_manholeb03" -> "s_manholeb03" -> found
+    // Stop early to avoid matching garbage from very short suffixes.
+    std::string cur = key;
+    int depth = 0;
+    while (!cur.empty() && depth < 6) {
+        if (auto* gm = try_stem(cur)) { m_world_gpu_cache[key] = gm; return gm; }
+        auto us = cur.find('_');
+        if (us == std::string::npos) break;
+        cur = cur.substr(us + 1);
+        ++depth;
+    }
+
+    m_world_gpu_cache[key] = nullptr;
+    std::cout << "[WORLD_MISS] " << asset_name << "\n";
+    return nullptr;
+}
+
+
+
+// Build draw calls from one parsed WorldData, appending into m_world_draws.
+// Helper: given a GPUModel, return the matrix that un-normalises its vertices
+// back to their original coordinate space. draw_scene applies S*T internally;
+// for world rendering we pre-bake it so the renderer just does MVP = VP * xform.
+// upload_model normalises each model's vertices: v_stored = (v_local - center) / scale
+// draw_scene undoes this with M = scale(1/scale) * translate(-center) for single-model view.
+// For world rendering we need the inverse un-normalisation THEN the world placement:
+//   final = world_xform * translate(center) * scale(scale_factor)
+// This maps stored vertices back to local space, then into the world.
+void App::build_world_draws(const WorldData& wd) {
+    for (auto& inst : wd.instances) {
+        GPUModel* gm = world_get_or_load_model(inst.asset_name);
+        if (!gm) continue;
+        // Vertices are in model-local space; inst.transform places them in world space.
+        m_world_draws.push_back({ gm, inst.transform });
+    }
+    for (auto& prop : wd.props) {
+        if (prop.type_idx < 0 || prop.type_idx >= (int)wd.prop_types.size()) continue;
+        GPUModel* gm = world_get_or_load_model(wd.prop_types[prop.type_idx]);
+        if (!gm) continue;
+        float yr = glm::radians(prop.yaw_deg);
+        glm::mat4 xf = glm::translate(glm::mat4(1.f), glm::vec3(prop.x, prop.y, prop.z));
+        xf = glm::rotate(xf, yr, glm::vec3(0.f, 1.f, 0.f));
+        m_world_draws.push_back({ gm, xf });
+    }
+}
+
+void App::recentre_camera_on_world() {
+    if (m_world_draws.empty()) return;
+
+    // Compute bounding box of all draw call origins
+    glm::vec3 mn(1e9f), mx(-1e9f);
+    for (auto& dc : m_world_draws) {
+        glm::vec3 p = glm::vec3(dc.xform[3]);
+        mn = glm::min(mn, p);
+        mx = glm::max(mx, p);
+    }
+    glm::vec3 centre = (mn + mx) * 0.5f;
+    float     extent = glm::length(mx - mn);
+
+    // Start above and behind the scene, looking toward centre
+    glm::vec3 start = centre + glm::vec3(0.f, extent * 0.15f, extent * 0.4f);
+    m_cam.reset_fly(start);
+    m_cam.fly_speed = glm::clamp(extent * 0.05f, 10.f, 2000.f);
+
+    // Aim the camera at the scene centre
+    glm::vec3 dir = glm::normalize(centre - start);
+    m_cam.yaw   = glm::degrees(atan2f(dir.x, dir.z));
+    m_cam.pitch = glm::degrees(asinf(glm::clamp(dir.y, -1.f, 1.f)));
+
+    std::cout << "[CAM] world centre=(" << centre.x << "," << centre.y << "," << centre.z
+              << ") extent=" << extent << " start=(" << start.x << "," << start.y << "," << start.z << ")\n";
+}
+
+// Load the terrain XBX for a sector: same stem as the .dat, same directory.
+// e.g. CITY_STRIP_A/A01/A01.dat  ->  looks for A01 in xbx_registry
+// Adds it at identity so it renders at world origin (terrain is pre-placed in world space).
+void App::load_sector_terrain(const std::string& dat_path) {
+    std::string stem = fs::path(dat_path).stem().string();
+    std::string key  = stem;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    GPUModel* gm = world_get_or_load_model(key);
+    if (gm) {
+        m_world_draws.push_back({ gm, glm::mat4(1.f) });
+        std::cout << "[TERRAIN] loaded " << stem << "\n";
+    } else {
+        std::cout << "[TERRAIN_MISS] " << stem << "\n";
+    }
+}
+
+void App::load_world(const std::string& dat_path) {
+    clear_world();
+    if (m_gpu_model) { m_gpu_model->release(); delete m_gpu_model; m_gpu_model = nullptr; }
+    if (m_gpu_skel)  { m_gpu_skel->release();  delete m_gpu_skel;  m_gpu_skel  = nullptr; }
+    m_ui_state.has_model = false;
+    m_ui_state.submeshes.clear();
+
+    m_ui_state.world_load_progress = 0.f;
+    m_ui_state.world_load_status   = "Parsing...";
+
+    WorldData* wd = parse_world(dat_path);
+    if (!wd) {
+        m_ui_state.world_load_progress = -1.f;
+        m_ui_state.status_msg = "Error: failed to parse world file";
+        return;
+    }
+
+    int total = (int)wd->instances.size() + (int)wd->props.size();
+    int done  = 0;
+
+    m_ui_state.world_load_status = "Loading models...";
+    for (auto& inst : wd->instances) {
+        world_get_or_load_model(inst.asset_name);
+        m_ui_state.world_load_progress = total > 0 ? (float)++done / total : 1.f;
+    }
+    for (auto& prop : wd->props) {
+        if (prop.type_idx >= 0 && prop.type_idx < (int)wd->prop_types.size())
+            world_get_or_load_model(wd->prop_types[prop.type_idx]);
+        m_ui_state.world_load_progress = total > 0 ? (float)++done / total : 1.f;
+    }
+
+    build_world_draws(*wd);
+    load_sector_terrain(dat_path);
+    recentre_camera_on_world();
+    m_ui_state.world_instance_count  = (int)wd->instances.size();
+    m_ui_state.world_prop_count      = (int)wd->props.size();
+    m_ui_state.world_dat_path        = dat_path;
+    m_ui_state.world_load_progress   = -1.f;  // hide bar
+    m_ui_state.status_msg            = "World loaded";
+    std::cout << "[WORLD] " << m_world_draws.size() << " draw calls\n";
+    delete wd;
+}
+
+void App::load_all_worlds() {
+    clear_world();
+    if (m_gpu_model) { m_gpu_model->release(); delete m_gpu_model; m_gpu_model = nullptr; }
+    if (m_gpu_skel)  { m_gpu_skel->release();  delete m_gpu_skel;  m_gpu_skel  = nullptr; }
+    m_ui_state.has_model = false;
+    m_ui_state.submeshes.clear();
+
+    int n_files = (int)m_ui_state.world_files.size();
+    if (n_files == 0) return;
+
+    int total_inst = 0, total_props = 0;
+    for (int fi = 0; fi < n_files; ++fi) {
+        m_ui_state.world_load_progress = (float)fi / n_files;
+        m_ui_state.world_load_status   = fs::path(m_ui_state.world_files[fi]).filename().string();
+
+        WorldData* wd = parse_world(m_ui_state.world_files[fi]);
+        if (!wd) continue;
+        total_inst  += (int)wd->instances.size();
+        total_props += (int)wd->props.size();
+        build_world_draws(*wd);
+        load_sector_terrain(m_ui_state.world_files[fi]);
+        delete wd;
+    }
+
+    recentre_camera_on_world();
+    m_world_mode                     = true;
+    m_ui_state.world_mode            = true;
+    m_ui_state.world_instance_count  = total_inst;
+    m_ui_state.world_prop_count      = total_props;
+    m_ui_state.world_dat_path        = "(all)";
+    m_ui_state.world_load_progress   = -1.f;
+    m_ui_state.status_msg            = "All worlds loaded";
+    std::cout << "[WORLD] all — " << m_world_draws.size() << " draw calls\n";
 }
 
 void App::load_file(int idx) {
     if (idx<0||idx>=(int)m_ui_state.files.size()) return;
     const std::string& path = m_ui_state.files[idx];
 
+    if (m_world_mode) clear_world();
     if (m_gpu_model) { m_gpu_model->release(); delete m_gpu_model; m_gpu_model=nullptr; }
     if (m_gpu_skel)  { m_gpu_skel->release();  delete m_gpu_skel;  m_gpu_skel=nullptr; }
     m_skeleton.reset();
@@ -792,6 +1106,23 @@ void App::run() {
         glfwGetFramebufferSize(m_window,&m_w,&m_h);
 
         double now = glfwGetTime();
+
+        // ── Fly cam WASD tick ─────────────────────────────────────────────────
+        if (m_world_mode && m_cam.fly && !ImGui::GetIO().WantCaptureKeyboard) {
+            unsigned keys = 0;
+            if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) keys |= 1;
+            if (glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS) keys |= 2;
+            if (glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS) keys |= 4;
+            if (glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS) keys |= 8;
+            if (glfwGetKey(m_window, GLFW_KEY_Q) == GLFW_PRESS) keys |= 16;
+            if (glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS) keys |= 32;
+            if (keys) {
+                float dt = (float)(now - m_last_frame);
+                if (dt > 0.1f) dt = 0.1f;
+                m_cam.fly_move(dt, keys);
+            }
+        }
+
         tick_animation(now);
 
         glViewport(0,0,m_w,m_h);
@@ -823,10 +1154,34 @@ void App::run() {
             ImGui::End();
         }
 
+        // Fly cam HUD
+        if (m_world_mode && m_cam.fly) {
+            ImGui::SetNextWindowPos({(float)vp_x()+10, 10});
+            ImGui::SetNextWindowBgAlpha(0.55f);
+            ImGui::Begin("##flyhud", nullptr,
+                ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
+                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_AlwaysAutoResize|
+                ImGuiWindowFlags_NoBringToFrontOnFocus);
+            ImGui::TextColored({0.4f,1.f,0.6f,1.f}, "FLY CAM");
+            ImGui::TextDisabled("WASD  move    Q/E  down/up");
+            ImGui::TextDisabled("RMB   look    scroll  speed");
+            ImGui::TextDisabled("Speed: %.0f u/s", m_cam.fly_speed);
+            if (m_fly_look)
+                ImGui::TextColored({1.f,0.8f,0.3f,1.f}, "LOOKING  (release RMB)");
+            ImGui::End();
+        }
+
         ImGui::Render();
 
         int w=vp_w(m_w);
-        m_renderer.draw_scene(m_cam,vp_x(),w,m_h,m_gpu_model,m_gpu_skel);
+        if (m_world_mode && !m_world_draws.empty()) {
+            std::vector<std::pair<GPUModel*, glm::mat4>> draws;
+            draws.reserve(m_world_draws.size());
+            for (auto& dc : m_world_draws) draws.push_back(std::make_pair(dc.model, dc.xform));
+            m_renderer.draw_world_instances(m_cam, vp_x(), w, m_h, draws);
+        } else {
+            m_renderer.draw_scene(m_cam,vp_x(),w,m_h,m_gpu_model,m_gpu_skel);
+        }
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(m_window);
@@ -836,6 +1191,8 @@ void App::run() {
 void App::shutdown() {
     if (m_gpu_model) { m_gpu_model->release(); delete m_gpu_model; }
     if (m_gpu_skel)  { m_gpu_skel->release();  delete m_gpu_skel; }
+    for (auto& [k, gm] : m_world_gpu_cache) { if (gm) { gm->release(); delete gm; } }
+    m_world_gpu_cache.clear();
     m_renderer.shutdown();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

@@ -65,7 +65,7 @@ target_include_directories(imguifiledialog_lib PUBLIC
         ${imguifiledialog_SOURCE_DIR})
 target_link_libraries(imguifiledialog_lib PUBLIC imgui_lib)
 
-
+# STB
 FetchContent_Declare(stb
         GIT_REPOSITORY https://github.com/nothings/stb.git
         GIT_TAG        master
@@ -85,8 +85,8 @@ set(SOURCES
         src/Renderer.cpp
         src/Camera.cpp
         src/Texture.cpp
-        src/Animation.cpp
-        src/UI.cpp)
+        src/UI.cpp
+        src/WorldParser.cpp)
 
 add_executable(XBXViewer ${SOURCES})
 
@@ -100,10 +100,15 @@ target_link_libraries(XBXViewer PRIVATE
         imguifiledialog_lib
         stb_lib)
 
-# Windows: subsystem console so we see stdout
+# Windows: keep a console window for stdout/stderr logging.
+# Use compiler-agnostic approach so it works with both MSVC and MinGW.
 if(WIN32)
-    target_link_options(XBXViewer PRIVATE /SUBSYSTEM:CONSOLE)
+    if(MSVC)
+        target_link_options(XBXViewer PRIVATE /SUBSYSTEM:CONSOLE)
+    else()
+        # MinGW / GCC: -mconsole sets the PE subsystem to console
+        target_link_options(XBXViewer PRIVATE -mconsole)
+    endif()
 endif()
 
-# Copy assets alongside exe (nothing needed at compile time)
 message(STATUS "XBX Viewer configured. Build with: cmake --build build --config Release")

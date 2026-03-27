@@ -65,6 +65,12 @@ public:
     void draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
                     const GPUModel* model, const GPUSkeleton* skel);
 
+    // Draw all world instances in a single pass.
+    // Each transform should already have the model's S*T normalization pre-baked in.
+    // Clears the viewport, draws all meshes, then the grid.
+    void draw_world_instances(const Camera& cam, int vp_x, int vp_w, int vp_h,
+                              const std::vector<std::pair<GPUModel*, glm::mat4>>& instances);
+
 private:
     unsigned int m_shader   = 0;
     unsigned int m_grid_vao = 0, m_grid_vbo = 0;

@@ -51,7 +51,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
     }
     ImGui::End();
 
-    // ── Left panel: file list ─────────────────────────────────────────────────
+    // ── Left panel: tabbed ────────────────────────────────────────────────────
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({(float)PANEL_W, dh - bot_h});
     ImGui::Begin("##panel", nullptr,
@@ -61,7 +61,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
     ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "XBX Model Viewer");
     ImGui::Separator();
 
-    // Folder input
+    // ── Folder bar ────────────────────────────────────────────────────────────
     static char fbuf[1024] = {};
     if (state.folder != std::string(fbuf))
         strncpy(fbuf, state.folder.c_str(), 1023);
@@ -69,7 +69,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
     float bw = ImGui::CalcTextSize("Browse").x + ImGui::GetStyle().FramePadding.x * 2 + 4;
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - ImGui::GetStyle().ItemSpacing.x);
     if (ImGui::InputText("##fld", fbuf, 1024)) state.folder = fbuf;
-
     ImGui::SameLine();
     if (ImGui::Button("Browse")) {
         IGFD::FileDialogConfig cfg;
@@ -95,46 +94,107 @@ void UI::draw(UIState& state, UICallbacks& cb,
         save_folder(state.folder);
         cb.on_scan_folder(state.folder);
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%d files", (int)state.files.size());
     ImGui::Separator();
 
-    // File list
-    static char search[128] = {};
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##search", "Search...", search, sizeof(search));
+    // ── Tabs ──────────────────────────────────────────────────────────────────
+    if (ImGui::BeginTabBar("##tabs")) {
 
-    std::string search_lo = search;
-    std::transform(search_lo.begin(), search_lo.end(), search_lo.begin(), ::tolower);
+        // ── Models tab ────────────────────────────────────────────────────────
+        if (ImGui::BeginTabItem("Models")) {
+            // Header row: file count + status
+            ImGui::TextDisabled("%d files", (int)state.files.size());
+            if (!state.status_msg.empty()) {
+                bool err = state.status_msg.rfind("Error",0)==0 || state.status_msg.rfind("Failed",0)==0;
+                ImGui::SameLine();
+                ImGui::TextColored(err ? ImVec4{1,.3f,.3f,1} : ImVec4{.6f,.6f,.6f,1},
+                                   "— %s", state.status_msg.c_str());
+            }
 
-    // Build filtered index
-    std::vector<int> filtered;
-    filtered.reserve(state.files.size());
-    for (int i = 0; i < (int)state.files.size(); ++i) {
-        if (search_lo.empty()) { filtered.push_back(i); continue; }
-        std::string fn = fs::path(state.files[i]).filename().string();
-        std::transform(fn.begin(), fn.end(), fn.begin(), ::tolower);
-        if (fn.find(search_lo) != std::string::npos) filtered.push_back(i);
-    }
+            static char search[128] = {};
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##search", "Search...", search, sizeof(search));
 
-    ImGuiListClipper clipper;
-    clipper.Begin((int)filtered.size());
-    while (clipper.Step())
-        for (int fi = clipper.DisplayStart; fi < clipper.DisplayEnd; ++fi) {
-            int i = filtered[fi];
-            std::string lbl = fs::path(state.files[i]).filename().string()
-                              + "##f" + std::to_string(i);
-            if (ImGui::Selectable(lbl.c_str(), i == state.selected) && i != state.selected)
-                cb.on_select_file(i);
+            std::string search_lo = search;
+            std::transform(search_lo.begin(), search_lo.end(), search_lo.begin(), ::tolower);
+
+            std::vector<int> filtered;
+            filtered.reserve(state.files.size());
+            for (int i = 0; i < (int)state.files.size(); ++i) {
+                if (search_lo.empty()) { filtered.push_back(i); continue; }
+                std::string fn = fs::path(state.files[i]).filename().string();
+                std::transform(fn.begin(), fn.end(), fn.begin(), ::tolower);
+                if (fn.find(search_lo) != std::string::npos) filtered.push_back(i);
+            }
+
+            for (int i = 0; i < (int)filtered.size(); ++i) {
+                int idx = filtered[i];
+                std::string lbl = fs::path(state.files[idx]).filename().string()
+                                  + "##f" + std::to_string(idx);
+                if (ImGui::Selectable(lbl.c_str(), idx == state.selected) && idx != state.selected)
+                    cb.on_select_file(idx);
+            }
+            ImGui::EndTabItem();
         }
-    clipper.End();
-    ImGui::Separator();
 
-    // Status
-    if (!state.status_msg.empty()) {
-        bool err = state.status_msg.rfind("Error",0)==0 || state.status_msg.rfind("Failed",0)==0;
-        ImGui::TextColored(err ? ImVec4{1,.3f,.3f,1} : ImVec4{.3f,1,.5f,1},
-                           "%s", state.status_msg.c_str());
+        // ── World tab ─────────────────────────────────────────────────────────
+        if (ImGui::BeginTabItem("World")) {
+            int n_world = (int)state.world_files.size();
+
+            // Status / progress area
+            if (state.world_load_progress >= 0.f) {
+                // Synchronous load: progress bar shows last reported state
+                char overlay[64];
+                snprintf(overlay, sizeof(overlay), "Loading... %s", state.world_load_status.c_str());
+                ImGui::ProgressBar(state.world_load_progress, {-1, 0}, overlay);
+            } else if (state.world_mode) {
+                ImGui::TextColored({0.4f,1.f,0.6f,1.f}, "WORLD ACTIVE");
+                ImGui::TextDisabled("%d instances  %d props",
+                    state.world_instance_count, state.world_prop_count);
+                if (!state.world_dat_path.empty()) {
+                    std::string wfn = state.world_dat_path;
+                    auto sl = wfn.rfind('/');
+                    if (sl == std::string::npos) sl = wfn.rfind('\\');
+                    if (sl != std::string::npos) wfn = wfn.substr(sl + 1);
+                    ImGui::TextDisabled("%s", wfn.c_str());
+                }
+            }
+
+            // Load All button
+            if (n_world > 0) {
+                if (ImGui::Button("Load All", {-1, 0}))
+                    if (cb.on_load_all_worlds) cb.on_load_all_worlds();
+            } else {
+                ImGui::TextDisabled("No world files found.");
+                ImGui::TextDisabled("Scan a folder first.");
+            }
+            ImGui::Separator();
+
+            // Search + list
+            static char wsearch[128] = {};
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##wsearch", "Search...", wsearch, sizeof(wsearch));
+            std::string wlo = wsearch;
+            std::transform(wlo.begin(), wlo.end(), wlo.begin(), ::tolower);
+
+            for (int i = 0; i < n_world; ++i) {
+                std::string fn = fs::path(state.world_files[i]).filename().string();
+                if (!wlo.empty()) {
+                    std::string fnl = fn;
+                    std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+                    if (fnl.find(wlo) == std::string::npos) continue;
+                }
+                bool active = state.world_mode &&
+                              state.world_dat_path == state.world_files[i];
+                if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.4f,1.f,0.6f,1.f});
+                std::string lbl = fn + "##w" + std::to_string(i);
+                if (ImGui::Selectable(lbl.c_str(), active))
+                    if (cb.on_load_world_file) cb.on_load_world_file(i);
+                if (active) ImGui::PopStyleColor();
+            }
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
     }
 
     ImGui::End();

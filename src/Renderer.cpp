@@ -7,7 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
-#include <algorithm>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -215,36 +215,11 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
     gm->center = (mn+mx)*0.5f;
     gm->scale  = std::max(std::max(mx.x-mn.x, mx.y-mn.y), std::max(mx.z-mn.z, 1e-6f));
 
-    // Derive a fallback stem from the model filename by stripping the trailing
-    // _NNNNNNNN number (e.g. "ARMORED_THUG_00000003" → "armored_thug").
-    // Submeshes whose material names reference other characters (e.g. "jewel_thief1",
-    // "art_thief_head1") fall through to this so the registry prefix matcher
-    // resolves them to the correct numbered texture (e.g. "armored_thug_00000002").
-    std::string model_stem;
-    {
-        std::string sl = fs::path(model->filepath).stem().string();
-        std::transform(sl.begin(), sl.end(), sl.begin(), ::tolower);
-        auto pos = sl.rfind('_');
-        if (pos != std::string::npos) {
-            std::string suffix = sl.substr(pos + 1);
-            if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
-                    [](char c){ return std::isdigit((unsigned char)c); }))
-                sl = sl.substr(0, pos);
-        }
-        model_stem = sl; // e.g. "armored_thug"
-    }
-
     for (auto& sm : model->submeshes) {
         GPUMesh m;
         m.mat_name  = sm.mat_name;
         m.n_indices = (int)sm.indices.size();
-
-        // Parser candidates first, then model-stem fallback.
-        std::vector<std::string> candidates = sm.tex_candidates;
-        if (!model_stem.empty() &&
-            std::find(candidates.begin(), candidates.end(), model_stem) == candidates.end())
-            candidates.push_back(model_stem);
-        m.tex_id = find_texture(candidates, dir);
+        m.tex_id    = find_texture(sm.tex_name, dir);
 
         // Interleave XYZ + UV
         std::vector<float> vdata;
@@ -408,6 +383,75 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
         glUniform3f(uloc("uWireCol"),0.22f,0.22f,0.26f);
         glBindVertexArray(m_grid_vao);
         glDrawArrays(GL_LINES,0,m_grid_n);
+        glBindVertexArray(0);
+    }
+
+    glUseProgram(0);
+    glDisable(GL_SCISSOR_TEST);
+}
+
+// ── World instance rendering ──────────────────────────────────────────────────
+// Reuses the same shader/mesh draw path as draw_scene but:
+//   - no per-model scale/center normalisation (pre-baked into transforms)
+//   - no skeleton, no submesh highlight, no model rotation
+//   - draws all instances then the grid once at the end
+void Renderer::draw_world_instances(const Camera& cam, int vp_x, int vp_w, int vp_h,
+                                    const std::vector<std::pair<GPUModel*, glm::mat4>>& instances) {
+    glViewport(vp_x, 0, vp_w, vp_h);
+    glScissor (vp_x, 0, vp_w, vp_h);
+    glEnable(GL_SCISSOR_TEST);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    float aspect = (float)vp_w / (float)std::max(vp_h, 1);
+    glm::mat4 VP = cam.proj(aspect) * cam.view();
+
+    glUseProgram(m_shader);
+    glUniform1i(uloc("uTex"),     0);
+    glUniform1i(uloc("uWire"),    0);
+    glUniform1i(uloc("uShowUV"),  0);
+    glUniform1i(uloc("uSkinned"), 0);  // world instances are unskinned
+    glUniform1f(uloc("uPointSize"), 1.f);
+
+    // Identity bones — uploaded once, shared by all instances
+    static const glm::mat4 ID(1.f);
+    static glm::mat4 id_bones[60];
+    static bool id_init = false;
+    if (!id_init) { for (auto& m : id_bones) m = ID; id_init = true; }
+    glUniformMatrix4fv(uloc("uBones"), 60, GL_FALSE, glm::value_ptr(id_bones[0]));
+
+    glActiveTexture(GL_TEXTURE0);
+
+    for (auto& [model, xform] : instances) {
+        if (!model) continue;
+        glm::mat4 MVP = VP * xform;
+        glUniformMatrix4fv(uloc("uMVP"),   1, GL_FALSE, glm::value_ptr(MVP));
+        glUniformMatrix4fv(uloc("uModel"), 1, GL_FALSE, glm::value_ptr(xform));
+
+        for (auto& mesh : model->meshes) {
+            glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
+            mesh.draw();
+        }
+
+        if (wireframe) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glUniform1i(uloc("uWire"), 1);
+            glUniform3f(uloc("uWireCol"), 0.2f, 0.9f, 0.4f);
+            glLineWidth(1.0f);
+            for (auto& mesh : model->meshes) mesh.draw();
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glUniform1i(uloc("uWire"), 0);
+        }
+    }
+
+    // Grid
+    if (show_grid) {
+        glm::mat4 gridMVP = VP;
+        glUniformMatrix4fv(uloc("uMVP"),   1, GL_FALSE, glm::value_ptr(gridMVP));
+        glUniform1i(uloc("uWire"),    1);
+        glUniform1i(uloc("uSkinned"), 0);
+        glUniform3f(uloc("uWireCol"), 0.22f, 0.22f, 0.26f);
+        glBindVertexArray(m_grid_vao);
+        glDrawArrays(GL_LINES, 0, m_grid_n);
         glBindVertexArray(0);
     }
 

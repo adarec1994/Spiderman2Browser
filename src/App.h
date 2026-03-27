@@ -5,10 +5,12 @@
 #include "XBXParser.h"
 #include "Skeleton.h"
 #include "Animation.h"
+#include "WorldParser.h"
 #include <string>
 #include <vector>
 #include <array>
 #include <memory>
+#include <unordered_map>
 #include <glm/glm.hpp>
 
 struct GLFWwindow;
@@ -56,32 +58,46 @@ private:
     float m_model_rot_y = 0.f;
 
     // Mouse
-    bool   m_drag_l = false, m_drag_r = false;
-    double m_lx = 0, m_ly = 0;
+    bool   m_drag_l   = false, m_drag_r = false;
+    double m_lx = 0,   m_ly   = 0;
+    bool   m_fly_look = false;  // RMB held in world fly mode = mouse-look
 
     // ── Animation ─────────────────────────────────────────────────────────────
     std::vector<AnimClip> m_anim_clips;
-    int                   m_anim_sel    = -1;   // selected clip index
-    bool                  m_anim_play   = false;
-    float                 m_anim_time   = 0.f;
-    double                m_last_frame  = 0.0;  // glfwGetTime() at last tick
+    int                   m_anim_sel   = -1;
+    bool                  m_anim_play  = false;
+    float                 m_anim_time  = 0.f;
+    double                m_last_frame = 0.0;
 
     void load_animations(const std::string& folder);
     void select_animation(int idx);
     void tick_animation(double now);
     void apply_animation_pose(float t);
 
-    // Maps animated bone index (0..clip.track_count/3) → skeleton bone index (0..59).
-    // Built when a clip is selected, using a name-based or index fallback mapping.
     std::vector<int> m_anim_bone_map;
-
     void build_anim_bone_map(const AnimClip& clip);
 
     // Prim-type override
     struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;
                          std::vector<glm::vec3> positions; };
-    std::vector<RawMeshData> m_cached_raw;  // one per submesh
+    std::vector<RawMeshData> m_cached_raw;
     void rebuild_prim_override(int smi, int sel);
+
+    // ── World / area ──────────────────────────────────────────────────────────
+    std::unordered_map<std::string, GPUModel*>   m_world_gpu_cache;
+    std::unordered_map<std::string, std::string> m_xbx_registry;
+
+    struct WorldDrawCall { GPUModel* model; glm::mat4 xform; };
+    std::vector<WorldDrawCall> m_world_draws;
+    bool m_world_mode = false;
+
+    GPUModel* world_get_or_load_model(const std::string& asset_name);
+    void      load_sector_terrain(const std::string& dat_path);
+    void      build_world_draws(const WorldData& wd);
+    void      recentre_camera_on_world();
+    void      load_world(const std::string& dat_path);
+    void      load_all_worlds();
+    void      clear_world();
     // ─────────────────────────────────────────────────────────────────────────
 
     void load_file(int idx);
