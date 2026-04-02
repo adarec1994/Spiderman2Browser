@@ -9,6 +9,7 @@
 #include <imgui_impl_opengl3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 #include <algorithm>
 #include <iostream>
@@ -102,7 +103,6 @@ void App::select_animation(int idx) {
     if (idx < 0 || idx >= (int)m_anim_clips.size()) {
         m_anim_sel  = -1;
         m_anim_play = false;
-        // Restore bind pose
         if (m_has_bones) {
             for (int i = 0; i < N_BONES; ++i) m_cur_pose[i] = m_bind_pose[i];
             upload_skinning();
@@ -116,8 +116,48 @@ void App::select_animation(int idx) {
 
     AnimClip& clip = m_anim_clips[idx];
     if (!clip.loaded) parse_animation(clip);
+    if (!m_anim_rest_pose.empty()) {
+        clip.rest_pose = m_anim_rest_pose;
+        clip.frames_decoded = false;  // force re-decode with rest pose
+        clip.cached_frames.clear();
+    }
 
     if (m_skeleton) build_anim_bone_map(clip);
+
+    // Debug: print bone mapping and frame-0 values
+    if (m_skeleton && clip.loaded) {
+        auto poses = clip.sample_pose(0.f);
+        int n_anim = (int)poses.size();
+        std::cout << "\n=== Anim '" << clip.name << "' debug ===\n";
+        for (int ai = 0; ai < n_anim; ++ai) {
+            int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : -1;
+            if (si < 0 || si >= (int)m_skeleton->bones.size()) continue;
+
+            const auto& bp = poses[ai];
+            float mag = std::sqrt(bp.q.x*bp.q.x + bp.q.y*bp.q.y + bp.q.z*bp.q.z);
+
+            // Extract rotation from bind pose matrix (3x3 upper-left)
+            glm::mat4 B = m_bind_pose[si];
+            // Bind pose translation = bone world position
+            glm::vec3 bt(B[3][0], B[3][1], B[3][2]);
+
+            std::cout << "  anim[" << ai << "]->skel[" << si << "] "
+                      << m_skeleton->bones[si].name
+                      << "  anim_quat=(" << bp.q.x << "," << bp.q.y << "," << bp.q.z << "," << bp.q.w
+                      << ") |" << mag << "|"
+                      << "  bind_pos=(" << bt.x << "," << bt.y << "," << bt.z << ")"
+                      << "\n";
+
+            // Show bind pose 3x3 rotation
+            if (ai < 4) {
+                std::cout << "    bind_mat row0=(" << B[0][0] << "," << B[1][0] << "," << B[2][0] << ")\n";
+                std::cout << "    bind_mat row1=(" << B[0][1] << "," << B[1][1] << "," << B[2][1] << ")\n";
+                std::cout << "    bind_mat row2=(" << B[0][2] << "," << B[1][2] << "," << B[2][2] << ")\n";
+            }
+        }
+        std::cout << std::endl;
+    }
+
     apply_animation_pose(0.f);
 }
 
@@ -126,25 +166,61 @@ void App::apply_animation_pose(float t) {
     if (m_anim_sel < 0 || m_anim_sel >= (int)m_anim_clips.size()) return;
 
     const AnimClip& clip = m_anim_clips[m_anim_sel];
-    if (!clip.loaded) return;
+    if (!clip.loaded || !m_skeleton) return;
 
-    // Start from bind pose
     for (int i = 0; i < N_BONES; ++i) m_cur_pose[i] = m_bind_pose[i];
 
     auto poses = clip.sample_pose(t);
     int n_anim = (int)poses.size();
+    int n_skel = (int)m_skeleton->bones.size();
 
-    for (int ai = 0; ai < n_anim; ++ai) {
-        int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : ai;
-        if (si < 0 || si >= N_BONES) continue;
+    // Extract bind local transforms
+    std::vector<glm::mat4> local_bind(n_skel, glm::mat4(1.0f));
+    for (int i = 0; i < n_skel && i < N_BONES; ++i) {
+        int par = m_skeleton->bones[i].parent;
+        if (par >= 0 && par < N_BONES)
+            local_bind[i] = glm::inverse(m_bind_pose[par]) * m_bind_pose[i];
+        else
+            local_bind[i] = m_bind_pose[i];
+    }
 
-        const BonePose& bp = poses[ai];
-        float angle = std::sqrt(bp.ax*bp.ax + bp.ay*bp.ay + bp.az*bp.az);
-        if (angle < 1e-8f) continue;
+    // For each animated bone: local_rot = T[bone] * nal_quat
+    // T = bind_local_q * inverse(rest_q), precomputed in m_nal_to_bind
+    // At rest: T * rest = bind_local (zero error proven)
+    // Animated: T * anim gives coordinate-correct rotation
+    for (int i = 0; i < n_skel && i < N_BONES; ++i) {
+        int par = m_skeleton->bones[i].parent;
+        glm::vec4 local_t = local_bind[i][3];
+        glm::mat4 local_rot = local_bind[i];
+        local_rot[3] = glm::vec4(0, 0, 0, 1);
 
-        // Apply rotation in bone's local space (pre-multiply rotation into bind pose)
-        glm::mat4 R = bp.to_matrix();
-        m_cur_pose[si] = m_bind_pose[si] * R;
+        // Check if this bone has animation data
+        for (int ai = 0; ai < n_anim; ++ai) {
+            int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : ai;
+            if (si != i) continue;
+
+            BonePose bp = poses[ai];
+            // Skip identity quaternions
+            float qmag2 = bp.q.x*bp.q.x + bp.q.y*bp.q.y + bp.q.z*bp.q.z;
+            if (qmag2 < 1e-8f && std::abs(bp.q.w - 1.0f) < 0.001f) break;
+
+            // Skip overflow from buggy codecs (valid quaternions have |q| ≈ 1.0)
+            float full_mag2 = qmag2 + bp.q.w*bp.q.w;
+            if (full_mag2 < 0.5f || full_mag2 > 2.0f) break;
+
+            // T * nal_quat = bind-space local rotation
+            glm::quat new_q = glm::normalize(m_nal_to_bind[i] * bp.q);
+            local_rot = glm::mat4_cast(new_q);
+            break;
+        }
+
+        glm::mat4 local_mat = local_rot;
+        local_mat[3] = local_t;
+
+        if (par >= 0 && par < N_BONES)
+            m_cur_pose[i] = m_cur_pose[par] * local_mat;
+        else
+            m_cur_pose[i] = local_mat;
     }
 
     upload_skinning();
@@ -171,7 +247,7 @@ void App::tick_animation(double now) {
                  ? (float)(clip.frame_count - 1) / clip.fps : 1.f);
 
     m_anim_time += (float)dt;
-    if (clip.loop) {
+    if (clip.looping) {
         if (dur > 0) m_anim_time = std::fmod(m_anim_time, dur);
     } else {
         if (m_anim_time >= dur) {
@@ -1197,6 +1273,56 @@ void App::load_file(int idx) {
         }
     }
 
+    // Load rest pose quaternions from skeleton for animation
+    {
+        auto full_rest = load_skeleton_rest_pose(skel_path);
+        if (!full_rest.empty()) {
+            static const int BC_PAL[24] = {0,1,2,3,4,5,8,9,10,11,29,30,31,32,50,51,52,53,54,55,56,57,58,59};
+            m_anim_rest_pose.resize(24);
+            for (int i = 0; i < 24; i++)
+                m_anim_rest_pose[i] = (BC_PAL[i] < (int)full_rest.size()) ? full_rest[BC_PAL[i]] : glm::quat(1,0,0,0);
+
+            m_full_rest_pose = full_rest;
+
+            // Compute per-bone NAL-to-bind transform: T = bind_local_quat * inverse(rest_quat)
+            // For any NAL quaternion q: bind_local_rotation = T * q
+            for (int i = 0; i < N_BONES; i++) m_nal_to_bind[i] = glm::quat(1,0,0,0);
+            if (m_skeleton) {
+                static const int BC_PAL[24] = {0,1,2,3,4,5,8,9,10,11,29,30,31,32,50,51,52,53,54,55,56,57,58,59};
+                int nb = (int)m_skeleton->bones.size();
+                for (int i = 0; i < nb && i < N_BONES; i++) {
+                    int par = m_skeleton->bones[i].parent;
+                    glm::mat4 local_mat;
+                    if (par >= 0 && par < N_BONES)
+                        local_mat = glm::inverse(m_bind_pose[par]) * m_bind_pose[i];
+                    else
+                        local_mat = m_bind_pose[i];
+
+                    glm::mat3 rot(local_mat);
+                    glm::quat bind_q = glm::normalize(glm::quat_cast(rot));
+                    glm::quat rest_q = (i < (int)full_rest.size()) ? full_rest[i] : glm::quat(1,0,0,0);
+                    m_nal_to_bind[i] = bind_q * glm::inverse(rest_q);
+                }
+                // Debug: verify T * rest = bind_local for BC bones
+                std::cout << "[T_DEBUG] Verifying T * rest == bind_local:\n";
+                for (int ai = 0; ai < 6; ai++) {
+                    int si = BC_PAL[ai];
+                    glm::quat rest_q = full_rest[si];
+                    glm::quat result = m_nal_to_bind[si] * rest_q;
+                    int par = m_skeleton->bones[si].parent;
+                    glm::mat4 lm = (par >= 0) ? glm::inverse(m_bind_pose[par]) * m_bind_pose[si] : m_bind_pose[si];
+                    glm::quat bind_q = glm::normalize(glm::quat_cast(glm::mat3(lm)));
+                    glm::quat diff = result * glm::inverse(bind_q);
+                    float err = std::abs(diff.x) + std::abs(diff.y) + std::abs(diff.z) + std::abs(1.0f - std::abs(diff.w));
+                    std::cout << "  bone[" << si << "] T=(" << m_nal_to_bind[si].x << "," << m_nal_to_bind[si].y
+                              << "," << m_nal_to_bind[si].z << "," << m_nal_to_bind[si].w << ")"
+                              << " err=" << err << "\n";
+                }
+            }
+            std::cout << "[SKEL] Loaded rest pose + NAL-to-bind transforms (" << full_rest.size() << " bones)\n";
+        }
+    }
+
     delete model;
     m_cam.reset();
     std::cout << "Loaded: " << path << "\n";
@@ -1274,6 +1400,27 @@ void App::run() {
             if (m_fly_look)
                 ImGui::TextColored({1.f,0.8f,0.3f,1.f}, "LOOKING  (release RMB)");
             ImGui::End();
+        }
+
+        // Animation debug panel
+        if (m_anim_sel >= 0) {
+            static float s_anim_scale = 1.0f;
+            static int s_anim_mode = 0;
+            ImGui::SetNextWindowPos({(float)vp_x()+10, (float)m_h - 160}, ImGuiCond_Once);
+            ImGui::SetNextWindowBgAlpha(0.8f);
+            ImGui::Begin("Anim Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+            ImGui::SliderFloat("Scale", &s_anim_scale, 0.01f, 5.0f, "%.3f");
+            const char* modes[] = {"FK additive", "FK absolute", "Direct post", "Direct pre"};
+            ImGui::Combo("Mode", &s_anim_mode, modes, 4);
+            if (ImGui::Button("Reset Scale")) s_anim_scale = 1.0f;
+            ImGui::SameLine();
+            if (ImGui::Button("x0.5")) s_anim_scale *= 0.5f;
+            ImGui::SameLine();
+            if (ImGui::Button("x2")) s_anim_scale *= 2.0f;
+            ImGui::Text("Effective: %.8f", s_anim_scale * 0.5f / 32768.0f);
+            ImGui::End();
+            m_anim_debug_scale = s_anim_scale;
+            m_anim_debug_mode = s_anim_mode;
         }
 
         ImGui::Render();

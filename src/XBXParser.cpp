@@ -107,55 +107,48 @@ XBXModel* parse_xbx(const std::string& filepath) {
         }
     }
 
-    // Locate geom_base: scan ALL chunks for the dword with tag 0x02xxxxxx,
-    // geom_base is the immediately following dword + 4.
-    // (2-chunk items have the sentinel in chunk[0]; 3-5 chunk characters may have it in later chunks)
-    uint32_t chunk_cnt = rd<uint32_t>(d, 0x08);
-    uint32_t geom_base = 0;
-    for (uint32_t ci = 0; ci < chunk_cnt && !geom_base; ++ci) {
-        uint32_t base = hdr_sz + ci * 0x30;
-        if (base + 12*4 > sz) break;
-        for (uint32_t i = 0; i < 12; ++i) {
-            uint32_t v = rd<uint32_t>(d, base + i*4);
-            if ((v & 0xFF000000) == 0x02000000 && i + 1 < 12) {
-                geom_base = rd<uint32_t>(d, base + (i+1)*4) + 4;
-                break;
+    // Collect all geom_bases: scan chunk table (stride 12 at hdr_sz) for GEO containers (0x02xxxxxx).
+    // Terrain XBXes have one GEO container per material/mesh section (10+ containers each with
+    // sm_cnt=1), while character XBXes have a single GEO container with sm_cnt=N.
+    // Both cases are handled by iterating all containers.
+    std::vector<uint32_t> geom_bases;
+    {
+        uint32_t n_ch = rd<uint32_t>(d, 0x08);
+        for (uint32_t ci = 0; ci < n_ch; ++ci) {
+            uint32_t base  = hdr_sz + ci * 12;
+            if (base + 12 > sz) break;
+            uint32_t ctype = rd<uint32_t>(d, base);
+            uint32_t ptr   = rd<uint32_t>(d, base + 4);
+            if ((ctype >> 24) != 0x02) continue;
+            uint32_t gb = ptr + 4;
+            if (gb + 0x48 > sz) continue;
+            uint32_t smc = rd<uint32_t>(d, gb + 0x04);
+            if (smc == 0 || smc > 64) continue;
+            geom_bases.push_back(gb);
+        }
+    }
+    // Fallback: original stride-0x30 scan for files where chunk table doesn't yield valid geom_bases
+    if (geom_bases.empty()) {
+        uint32_t chunk_cnt = rd<uint32_t>(d, 0x08);
+        for (uint32_t ci = 0; ci < chunk_cnt; ++ci) {
+            uint32_t base = hdr_sz + ci * 0x30;
+            if (base + 12*4 > sz) break;
+            for (uint32_t i = 0; i < 12; ++i) {
+                uint32_t v = rd<uint32_t>(d, base + i*4);
+                if ((v & 0xFF000000) == 0x02000000 && i + 1 < 12) {
+                    uint32_t gb = rd<uint32_t>(d, base + (i+1)*4) + 4;
+                    if (gb + 0x48 <= sz) {
+                        uint32_t smc = rd<uint32_t>(d, gb + 0x04);
+                        if (smc > 0 && smc <= 64)
+                            geom_bases.push_back(gb);
+                    }
+                    break;
+                }
             }
+            if (!geom_bases.empty()) break;
         }
     }
-    if (geom_base == 0 || geom_base + 0x48 > sz) return nullptr;
-
-    uint32_t sm_cnt = rd<uint32_t>(d, geom_base + 0x04);
-    if (sm_cnt == 0 || sm_cnt > 64) return nullptr;
-
-    std::vector<uint32_t> sm_ptrs(sm_cnt);
-    for (uint32_t i = 0; i < sm_cnt; ++i)
-        sm_ptrs[i] = rd<uint32_t>(d, geom_base + 0x40 + i*8);
-
-    // Texture names are read directly from the mat struct per-submesh below.
-    // (mat_ptr+0x24 = shader type; mat_ptr+0x44 = real tex when +0x24 is generic)
-
-    // fi_start at ptr+0x30; if zero, fall back to ptr+0x38.
-    // When using the p38 fallback, first 6 uint16s are a sub-header — skip them and treat as strip.
-    // fi_end = fi_start + idx_cnt*2 where idx_cnt is at ptr+0x2c.
-    constexpr uint32_t P38_HDR_SKIP = 6; // uint16s
-    std::vector<uint32_t> fi_starts(sm_cnt), fi_ends(sm_cnt);
-    std::vector<bool>     fi_from_p38(sm_cnt, false);
-    for (uint32_t i = 0; i < sm_cnt; ++i) {
-        uint32_t p30     = rd<uint32_t>(d, sm_ptrs[i] + 0x30);
-        uint32_t idx_cnt = rd<uint32_t>(d, sm_ptrs[i] + 0x2c);
-        uint32_t fi_start;
-        if (p30 != 0) {
-            fi_start = p30;
-        } else {
-            fi_from_p38[i] = true;
-            fi_start  = rd<uint32_t>(d, sm_ptrs[i] + 0x38);
-            fi_start += P38_HDR_SKIP * 2;               // skip sub-header
-            idx_cnt   = (idx_cnt > P38_HDR_SKIP) ? idx_cnt - P38_HDR_SKIP : 0;
-        }
-        fi_starts[i] = fi_start;
-        fi_ends[i]   = fi_start + idx_cnt * 2;
-    }
+    if (geom_bases.empty()) return nullptr;
 
     auto* model = new XBXModel();
     model->filepath = filepath;
@@ -174,9 +167,40 @@ XBXModel* parse_xbx(const std::string& filepath) {
         model->bind_pose[i] = m;
     }
 
+    constexpr uint32_t P38_HDR_SKIP = 6; // uint16s
     const uint32_t STRIDE = 32;
-    std::string last_tex_name; // carry forward: used when a submesh has no texture fields
-    for (uint32_t si = 0; si < sm_cnt; ++si) {
+    std::string last_tex_name; // carry forward across all geom_bases
+
+    for (uint32_t gbi = 0; gbi < (uint32_t)geom_bases.size(); ++gbi) {
+        uint32_t geom_base = geom_bases[gbi];
+        uint32_t sm_cnt = rd<uint32_t>(d, geom_base + 0x04);
+        if (sm_cnt == 0 || sm_cnt > 64) continue;
+
+        std::vector<uint32_t> sm_ptrs(sm_cnt);
+        for (uint32_t i = 0; i < sm_cnt; ++i)
+            sm_ptrs[i] = rd<uint32_t>(d, geom_base + 0x40 + i*8);
+
+        // fi_start at ptr+0x30; if zero, fall back to ptr+0x38.
+        // When using the p38 fallback, first 6 uint16s are a sub-header — skip them and treat as strip.
+        std::vector<uint32_t> fi_starts(sm_cnt), fi_ends(sm_cnt);
+        std::vector<bool>     fi_from_p38(sm_cnt, false);
+        for (uint32_t i = 0; i < sm_cnt; ++i) {
+            uint32_t p30     = rd<uint32_t>(d, sm_ptrs[i] + 0x30);
+            uint32_t idx_cnt = rd<uint32_t>(d, sm_ptrs[i] + 0x2c);
+            uint32_t fi_start;
+            if (p30 != 0) {
+                fi_start = p30;
+            } else {
+                fi_from_p38[i] = true;
+                fi_start  = rd<uint32_t>(d, sm_ptrs[i] + 0x38);
+                fi_start += P38_HDR_SKIP * 2;
+                idx_cnt   = (idx_cnt > P38_HDR_SKIP) ? idx_cnt - P38_HDR_SKIP : 0;
+            }
+            fi_starts[i] = fi_start;
+            fi_ends[i]   = fi_start + idx_cnt * 2;
+        }
+
+        for (uint32_t si = 0; si < sm_cnt; ++si) {
         uint32_t ptr = sm_ptrs[si];
         if (ptr + 0x60 > sz) continue;
 
@@ -215,6 +239,19 @@ XBXModel* parse_xbx(const std::string& filepath) {
             // Authoritative path: chunk descriptor table
             shader_type_str = it->second.shader;
             push(it->second.tex);
+            // The material record at mat_ptr has 3 stacked entries (stride 0x20 each):
+            //   +0x00 = mat_name, +0x20 = shader, +0x40 = texture.
+            // The descriptor's tex_ptr sometimes erroneously points to the mat_name
+            // itself (e.g. "sign" -> "sign") instead of the actual DDS texture at +0x44.
+            // Push the +0x44 field as an additional candidate when it differs.
+            if (mat_ptr + 0x48 <= sz) {
+                const char* t44 = reinterpret_cast<const char*>(d + mat_ptr + 0x44);
+                std::string s44(t44, strnlen(t44, 28));
+                if (!s44.empty() && s44 != it->second.tex && s44 != mat_name &&
+                    !std::isdigit((unsigned char)s44[0]) &&
+                    s44.find(' ') == std::string::npos)
+                    push(s44);
+            }
         } else {
             // Fallback: old fixed-offset scan for files not covered by chunk table
             auto is_shader = [](const std::string& s) -> bool {
@@ -403,8 +440,13 @@ XBXModel* parse_xbx(const std::string& filepath) {
                     sm.indices.push_back(i);   sm.indices.push_back(i+1); sm.indices.push_back(i+2);
                     sm.indices.push_back(i);   sm.indices.push_back(i+2); sm.indices.push_back(i+3);
                 }
+            } else if (prim_type == 5) {
+                // Sequential triangle list: every 3 verts = 1 triangle
+                for (uint32_t i = 0; i + 2 < vc; i += 3) {
+                    sm.indices.push_back(i); sm.indices.push_back(i+1); sm.indices.push_back(i+2);
+                }
             } else {
-                // Sequential triangle strip
+                // Sequential triangle strip (prim=6 or unknown)
                 for (uint32_t i = 0; i + 2 < vc; ++i) {
                     uint32_t a=i, b=i+1, c=i+2;
                     if (i&1) { sm.indices.push_back(a); sm.indices.push_back(c); sm.indices.push_back(b); }
@@ -420,7 +462,8 @@ XBXModel* parse_xbx(const std::string& filepath) {
         }
         if (!sm.indices.empty())
             model->submeshes.push_back(std::move(sm));
-    }
+        } // end inner sm loop
+    } // end geom_bases loop
 
     if (model->submeshes.empty()) { delete model; return nullptr; }
     return model;

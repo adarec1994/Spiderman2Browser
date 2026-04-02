@@ -57,6 +57,7 @@ uniform sampler2D uTex;
 uniform bool uHasTex;
 uniform bool uWire;
 uniform bool uShowUV;
+uniform bool uTranslucent;
 uniform vec3 uWireCol;
 out vec4 fragColor;
 
@@ -80,11 +81,15 @@ void main(){
     float ambient = 0.35;
     float light = ambient + d0 * 0.65 + d1 + d2;
 
-    vec3 base = uHasTex ? texture(uTex, vUV).rgb : vec3(0.60, 0.62, 0.65);
+    vec4 texel = uHasTex ? texture(uTex, vUV) : vec4(0.60, 0.62, 0.65, 1.0);
+    float alpha = uTranslucent ? texel.a : 1.0;
+    if (uTranslucent && alpha < 0.02) discard;
+
+    vec3 base = texel.rgb;
     // Gamma expand: GameCube textures were authored for CRT (gamma 2.2).
     // Without this they appear nearly black on a linear display.
     base = pow(max(base, vec3(0.0001)), vec3(1.0 / 2.2));
-    fragColor = vec4(base * light, 1.0);
+    fragColor = vec4(base * light, alpha);
 }
 )";
 
@@ -209,6 +214,7 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
     if (!model) return nullptr;
     std::string dir = fs::path(model->filepath).parent_path().string();
     auto* gm = new GPUModel();
+    gm->filepath = model->filepath;
 
     glm::vec3 mn(1e9f), mx(-1e9f);
     for (auto& sm:model->submeshes) for (auto& p:sm.positions) { mn=glm::min(mn,p); mx=glm::max(mx,p); }
@@ -217,9 +223,17 @@ GPUModel* Renderer::upload_model(const XBXModel* model) {
 
     for (auto& sm : model->submeshes) {
         GPUMesh m;
-        m.mat_name  = sm.mat_name;
-        m.n_indices = (int)sm.indices.size();
-        m.tex_id    = find_texture(sm.tex_name, dir);
+        m.mat_name    = sm.mat_name;
+        m.n_indices   = (int)sm.indices.size();
+        m.tex_id      = find_texture(sm.tex_candidates, dir);
+        m.translucent = (sm.shader_type.find("translucent") != std::string::npos ||
+                         sm.shader_type.find("glass")       != std::string::npos ||
+                         sm.shader_type.find("fxenv")       != std::string::npos);
+        // Material names ending in "_a" indicate alpha channel (e.g. "lamplite1_a")
+        if (!m.translucent && sm.mat_name.size() >= 2) {
+            auto tail = sm.mat_name.substr(sm.mat_name.size() - 2);
+            if (tail == "_a" || tail == "_A") m.translucent = true;
+        }
 
         // Interleave XYZ + UV
         std::vector<float> vdata;
@@ -319,6 +333,7 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     // Solid mesh
     for (auto& mesh : model->meshes) {
         glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
+        glUniform1i(uloc("uTranslucent"), mesh.translucent ? 1 : 0);
         mesh.draw();
     }
 
@@ -460,6 +475,7 @@ void Renderer::draw_world_instances(const Camera& cam, int vp_x, int vp_w, int v
 
         for (auto& mesh : model->meshes) {
             glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
+            glUniform1i(uloc("uTranslucent"), mesh.translucent ? 1 : 0);
             if (mesh.tex_id != last_tex) {
                 glBindTexture(GL_TEXTURE_2D, mesh.tex_id);
                 last_tex = mesh.tex_id;

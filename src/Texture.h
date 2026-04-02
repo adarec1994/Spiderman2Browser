@@ -20,3 +20,7 @@ void build_tex_registry(const std::string& root_dir);
 
 // Returns all indexed stems + their file paths, sorted alphabetically.
 void get_registry_entries(std::vector<std::pair<std::string,std::string>>& out);
+
+// Registry-only lookup (skips local directory scan).
+// Use this for world/environment models where the global registry is always sufficient.
+unsigned int find_texture_world(const std::string& hint);

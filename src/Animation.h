@@ -1,69 +1,53 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <array>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
-// Per-track record: 9 bytes [type:1][float32 f0:4][float32 f1:4]
-//
-// CONFIRMED FORMAT (RE analysis):
-//   f0 = frame-0 axis-angle component. Always the correct decoded float.
-//   f1 = delta RANGE for variable tracks (NOT the frame-1 value).
-//        Constant tracks: f1 == 0 (bone does not move).
-//        Variable tracks: f1 = motion range; actual per-frame keyframes are
-//        NAL_Packed8EntropyFloat3 entropy-coded in extra_kf_data (decode TODO).
-//
-// Tracks grouped 3 per bone: [bone*3+0]=X [+1]=Y [+2]=Z.
-// Axis-angle vec3: direction=rotation axis, magnitude=angle in radians.
-// Matches FUN_0037c200 (FSIN/FCOS on magnitude).
-struct TrackRecord {
-    uint8_t type;   // NAL Golomb-Rice k parameter
-    float   f0;     // frame-0 component (confirmed correct float)
-    float   f1;     // motion range (0=constant; non-zero=animated, decode TODO)
-};
-
-// Per-animated-bone axis-angle vector (xyz = axis * angle in radians)
 struct BonePose {
-    float ax, ay, az;
-    glm::mat4 to_matrix() const;  // Rodrigues, matches FUN_0037c200
+    glm::quat q = glm::quat(1, 0, 0, 0);
+    glm::mat4 to_matrix() const;
 };
 
 struct AnimClip {
     std::string name;
     std::string path;
+    bool        loaded      = false;
+    bool        looping     = false;
+    float       duration    = 0.f;
+    float       fps         = 30.f;
+    int         frame_count = 0;
+    int         track_count = 0;
+    int         n_bones     = 24;
+    float       qscale      = 0.f;
 
-    float    duration    = 0.f;
-    float    fps         = 30.f;
-    int      frame_count = 0;
-    bool     loop        = false;
-    uint32_t track_count = 0;   // tc; n_animated_bones = tc/3
+    struct Section {
+        int frame_start = 0;
+        int frame_count = 0;
+        int n_active    = 0;
+        std::vector<uint8_t> codec_x, codec_y, codec_z;
+        std::vector<uint8_t> bitstream;
+        size_t bitstream_bit_offset = 0;
+    };
+    std::vector<Section> sections;
 
-    // NAL codec params (per character class): stored at 0xb8 and 0xbc
-    uint32_t bits_per_comp = 8;    // b8 (8 for BC, 22-131 for COP, 27 for CIV)
-    uint32_t quant_range   = 4064; // bc
+    // Rest pose quaternions (one per anim bone, indexed 0..n_bones-1)
+    // Must be set before calling sample_pose for correct results.
+    std::vector<glm::quat> rest_pose;
 
-    // Decoded base track records (size = track_count).
-    // f0 = confirmed correct frame-0 rotation component.
-    // f1 = motion range (non-zero identifies variable/animated tracks).
-    std::vector<TrackRecord> tracks;
-
-    // Number of variable tracks (= tail.size(), always 6 in observed data).
-    int n_variable_tracks = 0;
-
-    // Raw entropy-coded keyframe deltas (NAL_Packed8Entropy, decode TODO).
-    std::vector<uint8_t> extra_kf_data;
-
-    // Tail: [4, N_frames] per variable track, at end of stream.
-    struct TailEntry { uint32_t bytes_per_val; uint32_t n_frames; };
-    std::vector<TailEntry> tail;
-
-    bool loaded = false;
-
-    // Sample pose at time t (seconds).
-    // Returns one BonePose per bone (size = track_count/3).
-    // Constant tracks: exact f0. Variable tracks: f0 (keyframe decode TODO).
     std::vector<BonePose> sample_pose(float t) const;
+
+    mutable bool frames_decoded = false;
+    mutable std::vector<std::vector<BonePose>> cached_frames;
+    void decode_all_frames() const;
 };
 
+// Load rest-pose quaternions from a skeleton .dat file.
+// Returns 60 quaternions (one per skeleton bone), or empty on failure.
+// Offset 0x2400, stride 16 bytes (x,y,z,w floats).
+std::vector<glm::quat> load_skeleton_rest_pose(const std::string& skel_path);
+
 std::vector<AnimClip> scan_animations(const std::string& folder);
-bool parse_animation(AnimClip& clip);
+void parse_animation(AnimClip& clip);

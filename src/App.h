@@ -76,6 +76,11 @@ private:
 
     std::vector<int> m_anim_bone_map;
     void build_anim_bone_map(const AnimClip& clip);
+    float m_anim_debug_scale = 1.0f;
+    int   m_anim_debug_mode  = 0;
+    std::vector<glm::quat> m_anim_rest_pose; // 24 rest quats mapped via BC_PALETTE
+    std::vector<glm::quat> m_full_rest_pose; // all 60 rest quats for FK
+    std::array<glm::quat, 60> m_nal_to_bind;  // per-skel-bone: T = bind_local_q * inv(rest_q)
 
     // Prim-type override
     struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;

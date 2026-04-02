@@ -86,7 +86,8 @@ set(SOURCES
         src/Camera.cpp
         src/Texture.cpp
         src/UI.cpp
-        src/WorldParser.cpp)
+        src/WorldParser.cpp
+)
 
 add_executable(XBXViewer ${SOURCES})
 

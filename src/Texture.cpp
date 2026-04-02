@@ -130,6 +130,7 @@ void build_tex_registry(const std::string& root_dir) {
     g_stems_sorted.clear();
     std::error_code ec;
     size_t count = 0;
+    // ── Pass 1: index all loadable image files ────────────────────────────────
     for (auto& entry : fs::recursive_directory_iterator(root_dir, ec)) {
         if (ec) { ec.clear(); continue; }
         if (!entry.is_regular_file()) continue;
@@ -151,8 +152,67 @@ void build_tex_registry(const std::string& root_dir) {
         }
         ++count;
     }
+
+    // ── Pass 2: resolve IFL references (.sg_ files) ──────────────────────────
+    // IFL (Image File List) files are tiny text files mapping an _ifl texture
+    // name to the real texture filename.  e.g. SG_ALLEYWALL_IFL.sg_ contains
+    // "sg_blg_alleywall01_res.tga".  We read each .sg_ file, resolve the
+    // referenced texture through the registry, and add the IFL stem as an alias.
+    size_t ifl_count = 0;
+    ec.clear();
+    for (auto& entry : fs::recursive_directory_iterator(root_dir, ec)) {
+        if (ec) { ec.clear(); continue; }
+        if (!entry.is_regular_file()) continue;
+        std::string fnl = entry.path().filename().string();
+        std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+        std::string ext2 = fs::path(fnl).extension().string();
+        if (ext2 != ".sg_") continue;
+
+        // IFL stem: e.g. "sg_alleywall_ifl"
+        std::string ifl_stem = fs::path(fnl).stem().string();
+        if (g_registry.count(ifl_stem)) continue; // already mapped
+
+        // Read the file (typically < 40 bytes)
+        std::ifstream ifl_f(entry.path().string());
+        if (!ifl_f) continue;
+        std::string line;
+        std::getline(ifl_f, line);
+        // Trim whitespace / newline
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+            line.pop_back();
+        if (line.empty()) continue;
+
+        // Lowercase and strip image extension to get the referenced stem
+        std::transform(line.begin(), line.end(), line.begin(), ::tolower);
+        std::string ref_stem = fs::path(line).stem().string();
+        if (ref_stem.empty()) continue;
+
+        // Resolve through the registry (the DDS was already indexed in pass 1)
+        auto it = g_registry.find(ref_stem);
+        if (it != g_registry.end()) {
+            g_registry[ifl_stem] = it->second;
+            g_stems_sorted.push_back(ifl_stem);
+            ++ifl_count;
+
+            // Also register the base name (without "_ifl") as an alias.
+            // XBX materials reference "s_str_bas1" but the DDS is only reachable
+            // through the IFL file "s_str_bas1_ifl.sg_".  This bidirectional
+            // mapping lets direct lookups resolve without prefix scanning.
+            static const std::string IFL_SUFFIX = "_ifl";
+            if (ifl_stem.size() > IFL_SUFFIX.size() &&
+                ifl_stem.substr(ifl_stem.size() - IFL_SUFFIX.size()) == IFL_SUFFIX) {
+                std::string base_stem = ifl_stem.substr(0, ifl_stem.size() - IFL_SUFFIX.size());
+                if (!base_stem.empty() && g_registry.find(base_stem) == g_registry.end()) {
+                    g_registry[base_stem] = it->second;
+                    g_stems_sorted.push_back(base_stem);
+                }
+            }
+        }
+    }
+
     std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
-    std::cerr << "[TEXREG] indexed " << count << " image files under " << root_dir << "\n";
+    std::cerr << "[TEXREG] indexed " << count << " image files"
+              << " + " << ifl_count << " IFL aliases under " << root_dir << "\n";
 }
 
 static unsigned int registry_lookup(const std::string& hint) {
@@ -185,6 +245,18 @@ static unsigned int registry_lookup(const std::string& hint) {
     for (auto& t : tries) {
         auto it = g_registry.find(t);
         if (it != g_registry.end()) return load_texture(it->second);
+    }
+
+    // IFL alias: "s_str_bas1" → try "s_str_bas1_ifl" which may have been
+    // resolved to the real DDS path in build_tex_registry pass 2.
+    // Also try common game suffixes: _res (resolved texture), _00 (numbered variant).
+    {
+        static const char* suffixes[] = { "_ifl", "_res", "_00", "_01", nullptr };
+        for (int i = 0; suffixes[i]; ++i) {
+            std::string key = basel + suffixes[i];
+            auto it = g_registry.find(key);
+            if (it != g_registry.end()) return load_texture(it->second);
+        }
     }
 
     // Prefix match with iterative suffix stripping.
@@ -301,4 +373,8 @@ void get_registry_entries(std::vector<std::pair<std::string,std::string>>& out) 
         if (it != g_registry.end())
             out.push_back({stem, it->second});
     }
+}
+
+unsigned int find_texture_world(const std::string& hint) {
+    return registry_lookup(hint);
 }

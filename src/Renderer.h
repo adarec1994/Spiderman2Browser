@@ -14,6 +14,7 @@ struct GPUMesh {
     unsigned int bone_vbo  = 0;  // bone idx + wt (vec4+vec4)
     unsigned int ibo       = 0;
     int          n_indices = 0;
+    bool         translucent = false;
 
     void draw() const;
     void release();
@@ -23,6 +24,7 @@ struct GPUModel {
     std::vector<GPUMesh> meshes;
     glm::vec3            center{0};
     float                scale = 1.f;
+    std::string          filepath; // source XBX path
 
     void draw() const;
     void release();

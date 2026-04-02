@@ -1,216 +1,413 @@
 #include "Animation.h"
 #include <fstream>
-#include <filesystem>
-#include <iostream>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
-#include <glm/gtc/matrix_transform.hpp>
+#include <iostream>
+#include <filesystem>
 
-namespace fs = std::filesystem;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-static uint32_t ru32(const uint8_t* p) {
-    uint32_t v; memcpy(&v, p, 4); return v;
-}
-static float rf32(const uint8_t* p) {
-    float v; memcpy(&v, p, 4); return v;
-}
-
-// True if a float is a plausible axis-angle component (|v| < 2π + margin).
-static bool is_plausible(float v) {
-    return std::isfinite(v) && std::fabs(v) < 7.0f;
+static std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    size_t sz = f.tellg(); f.seekg(0);
+    std::vector<uint8_t> buf(sz);
+    f.read(reinterpret_cast<char*>(buf.data()), sz);
+    return buf;
 }
 
-// ── BonePose::to_matrix ───────────────────────────────────────────────────────
-// Rodrigues' rotation formula, matching FUN_0037c200 (FSIN/FCOS on magnitude).
-glm::mat4 BonePose::to_matrix() const {
-    float angle = std::sqrt(ax*ax + ay*ay + az*az);
-    if (angle < 1e-8f) return glm::mat4(1.0f);
-
-    float inv = 1.0f / angle;
-    float nx = ax * inv, ny = ay * inv, nz = az * inv;
-    float s = std::sin(angle),  c = std::cos(angle),  t = 1.0f - c;
-
-    return glm::mat4(
-        t*nx*nx + c,    t*nx*ny + s*nz, t*nx*nz - s*ny, 0,
-        t*nx*ny - s*nz, t*ny*ny + c,    t*ny*nz + s*nx, 0,
-        t*nx*nz + s*ny, t*ny*nz - s*nx, t*nz*nz + c,    0,
-        0,              0,              0,              1
-    );
+template<typename T>
+static T rd(const uint8_t* p, size_t off) {
+    T v; memcpy(&v, p + off, sizeof(T)); return v;
 }
 
-// ── AnimClip::sample_pose ─────────────────────────────────────────────────────
-std::vector<BonePose> AnimClip::sample_pose(float /*t*/) const {
-    int n_bones = (int)track_count / 3;
-    std::vector<BonePose> out(n_bones, {0.f, 0.f, 0.f});
+// Per-bone skeleton scale factors for Black Cat (from BLACK_CAT.dat offset 0x2AE0)
+static const int BC_PALETTE[24] = {
+    0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 29, 30, 31, 32, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59
+};
+static const float SKEL_BONE_SCALE[60] = {
+     0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f,
+     0.00781250f, 0.00781250f, 0.00781250f, 0.00100000f, 0.00100000f, 0.00781250f,
+     0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f,
+     0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f,
+     0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.00100000f, 0.00100000f,
+     0.00100000f, 0.00100000f, 0.00781250f, 0.01562500f, 0.01562500f, 0.01562500f,
+     0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f,
+     0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f, 0.01562500f,
+     0.01562500f, 0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f,
+     0.00195312f, 0.00195312f, 0.00195312f, 0.00100000f, 0.00195312f, 0.00195312f,
+};
 
-    if (!loaded || tracks.empty()) return out;
+glm::mat4 BonePose::to_matrix() const { return glm::mat4_cast(q); }
 
-    // We always return the frame-0 pose from f0.
-    //
-    // CONFIRMED: f0 is the correct decoded float for every track:
-    //   - Constant tracks (f1==0): f0 is the static bone rotation.
-    //   - Variable tracks (f1!=0): f0 is the base/frame-0 value; the
-    //     per-frame keyframe deltas live in extra_kf_data as NAL_Packed8Entropy
-    //     coded integers (decode TODO — requires the runtime NAL decoder).
-    //
-    // For 2-frame POSE files (BCSWGVERT*): f0 gives the correct swing pose.
-    // For multi-frame files: f0 gives the correct rest/base pose, with
-    // animated bones frozen at their frame-0 position until keyframes decoded.
+// ============================================================
+// Rest pose loader
+// ============================================================
+std::vector<glm::quat> load_skeleton_rest_pose(const std::string& skel_path) {
+    auto data = read_file(skel_path);
+    constexpr size_t REST_OFFSET = 0x2400;
+    constexpr int    MAX_BONES   = 60;
+    constexpr int    STRIDE      = 16;
 
-    for (int bone = 0; bone < n_bones; ++bone) {
-        float vals[3] = {0.f, 0.f, 0.f};
-        for (int c = 0; c < 3; ++c) {
-            int ti = bone * 3 + c;
-            if (ti >= (int)tracks.size()) break;
-            const TrackRecord& tr = tracks[ti];
-            vals[c] = is_plausible(tr.f0) ? tr.f0 : 0.f;
-        }
-        out[bone] = {vals[0], vals[1], vals[2]};
+    std::vector<glm::quat> out;
+    if (data.size() < REST_OFFSET + MAX_BONES * STRIDE) return out;
+
+    out.resize(MAX_BONES);
+    for (int i = 0; i < MAX_BONES; i++) {
+        size_t off = REST_OFFSET + i * STRIDE;
+        float x = rd<float>(data.data(), off);
+        float y = rd<float>(data.data(), off + 4);
+        float z = rd<float>(data.data(), off + 8);
+        float w = rd<float>(data.data(), off + 12);
+        out[i] = glm::quat(w, x, y, z);
     }
     return out;
 }
 
-// ── Header parsing ────────────────────────────────────────────────────────────
+// ============================================================
+// BitReader
+// ============================================================
+struct BitReader {
+    const uint8_t* data; size_t len, bp; int bi;
+    BitReader(const uint8_t* d, size_t n, size_t bo = 0, int bio = 0)
+        : data(d), len(n), bp(bo), bi(bio) {}
+    uint32_t read(int n) {
+        uint32_t v = 0; int g = 0;
+        while (g < n) { if (bp >= len) return v; int a = 8-bi, t = std::min(a, n-g);
+        v |= (uint32_t)((data[bp]>>bi)&((1<<t)-1))<<g; g+=t; bi+=t; if (bi>=8){bi=0;bp++;}} return v; }
+    uint32_t peek(int n) { auto sb=bp; auto si=bi; auto v=read(n); bp=sb; bi=si; return v; }
+    size_t tell() const { return bp*8+bi; }
+};
 
-static bool parse_header(const std::vector<uint8_t>& data, AnimClip& clip) {
-    if (data.size() < 0x150) return false;
-    if (ru32(data.data()) != 0x00010101) return false;
+static inline int32_t sar(int32_t v, int s) { return v >> s; }
+static void dec_zeros(int32_t* o, int n) { for (int i = 0; i < n; i++) o[i] = 0; }
 
-    const char* name_ptr = reinterpret_cast<const char*>(data.data() + 0x14);
-    clip.name = std::string(name_ptr, strnlen(name_ptr, 64));
-
-    clip.loop          = (ru32(data.data() + 0xa4) != 0);
-    clip.duration      = rf32(data.data() + 0xa8);
-    clip.fps           = rf32(data.data() + 0xb0);
-    clip.frame_count   = (int)ru32(data.data() + 0xb4);
-    clip.bits_per_comp = ru32(data.data() + 0xb8);
-    clip.quant_range   = ru32(data.data() + 0xbc);
-    clip.track_count   = ru32(data.data() + 0xc4);
-
-    // tc must be a non-zero multiple of 3 (axis-angle format)
-    return clip.track_count > 0 && clip.track_count % 3 == 0;
+// ============================================================
+// Entropy codecs (all 62 functions)
+// ============================================================
+static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
+    int32_t b, v, low2, low3;
+    switch (codec) {
+    case 1:
+        b=br.peek(2); if(!(b&1)){br.read(1);out[0]=0;return 1;}
+        br.read(2);out[0]=(b&3)-2;return 1;
+    case 2:
+        b=br.peek(4); if(!(b&1)){br.read(1);{int r=std::min(7,rem);dec_zeros(out,r);return r;}}
+        if(!(b&2)){br.read(2);{int r=std::min(2,rem);dec_zeros(out,r);return r;}}
+        if(!(b&4)){br.read(3);out[0]=0;return 1;} br.read(4);out[0]=sar(b,2)-2;return 1;
+    case 3:
+        b=br.peek(3); if(!(b&1)){br.read(1);{int r=std::min(3,rem);dec_zeros(out,r);return r;}}
+        if(!(b&2)){br.read(2);out[0]=0;return 1;} br.read(3);out[0]=sar(b,1)-2;return 1;
+    case 4:
+        b=br.peek(4); if(!(b&1)){br.read(1);{int r=std::min(4,rem);dec_zeros(out,r);return r;}}
+        if(!(b&2)){br.read(2);{int r=std::min(2,rem);dec_zeros(out,r);return r;}}
+        if(!(b&4)){br.read(3);out[0]=0;return 1;} br.read(4);out[0]=sar(b,2)-2;return 1;
+    case 5: v=br.read(2);if(v==0){int r=std::min(6,rem);dec_zeros(out,r);return r;}out[0]=v-2;return 1;
+    case 6:
+        b=br.peek(3);if(!(b&1)){br.read(1);out[0]=0;return 1;}
+        br.read(3);v=sar(b,1);out[0]=sar(v,1)+v-2;return 1;
+    case 7:
+        b=br.peek(3);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}br.read(3);out[0]=-2;return 1;
+    case 8:
+        b=br.peek(5);if(!(b&1)){br.read(1);{int r=std::min(4,rem);dec_zeros(out,r);return r;}}
+        if(!(b&2)){br.read(2);{int r=std::min(2,rem);dec_zeros(out,r);return r;}}
+        if(!(b&4)){br.read(3);out[0]=0;return 1;}br.read(5);v=sar(b,3);out[0]=sar(v,1)+v-2;return 1;
+    case 9:
+        b=br.peek(4);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}
+        v=sar(b,2);if(!(v&2))v+=-3;br.read(4);out[0]=v;return 1;
+    case 10: v=br.read(3);if(v==0){int r=std::min(3,rem);dec_zeros(out,r);return r;}out[0]=v-4;return 1;
+    case 11:
+        b=br.peek(5);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}
+        v=sar(b,2);if(v&4)v+=-2;else v+=-5;br.read(5);out[0]=v;return 1;
+    case 12: v=br.read(4);if(v==0){int r=std::min(4,rem);dec_zeros(out,r);return r;}out[0]=v-8;return 1;
+    case 13:
+        b=br.peek(5);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        if(low3==2){br.read(4);out[0]=(b&8)?3:-3;return 1;}
+        if(low3&1){br.read(5);out[0]=-4-sar(b,3);return 1;}br.read(5);out[0]=sar(b,3)+4;return 1;
+    case 14:
+        b=br.peek(6);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}
+        if(!(b&4)){v=sar(b,3)&3;if(!(v&2))v+=-3;br.read(5);out[0]=v;return 1;}
+        v=sar(b,3);if(!(v&4))v+=-7;br.read(6);out[0]=v;return 1;
+    case 15:
+        b=br.peek(5);if(!(b&1)){br.read(4);v=b&0xF;if(v==0){int r=std::min(4,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-4;return 1;}
+        {int32_t c=sar(b,1)&1;int32_t a=sar(b,2);if(!(a&4))a+=-7;br.read(5);out[0]=a<<c;return 1;}
+    case 16:
+        b=br.peek(7);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}
+        if(!(b&4)){v=sar(b,3)&3;if(!(v&2))v+=-3;br.read(5);out[0]=v;return 1;}
+        {int32_t c=sar(b,3)&1;v=sar(b,4);if(!(v&4))v+=-7;br.read(7);out[0]=v<<c;return 1;}
+    case 17:
+        b=br.peek(7);if(!(b&1)){br.read(2);if(!(b&2)){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=0;return 1;}
+        if(!(b&2)){br.read(3);v=sar(b,1)&2;out[0]=v-1;return 1;}
+        if(!(b&4)){br.read(5);v=sar(b,3)&3;if(!(v&2))v+=-3;out[0]=v;return 1;}
+        {int32_t c=sar(b,3)&1;v=sar(b,4);if(!(v&4))v+=-7;br.read(7);out[0]=v<<c;return 1;}
+    case 18:
+        v=br.read(5);if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}
+        {int32_t l2=v&3;if(l2==0){out[0]=sar(v,2)-4;return 1;}int32_t c=l2-1;int32_t a=sar(v,2);if(!(a&4))a+=-7;out[0]=a<<c;return 1;}
+    case 19:
+        b=br.peek(6);if(!(b&1)){br.read(4);v=b&0xF;if(v==0){int r=std::min(4,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-4;return 1;}
+        if(!(b&2)){v=sar(b,2)&7;br.read(5);if(!(v&4))v+=-7;out[0]=v;return 1;}
+        {int32_t sh=(sar(b,2)&1)+1;v=sar(b,3);br.read(6);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
+    case 20:
+        b=br.peek(7);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        if(low3==0){br.read(4);out[0]=(b&8)?3:-3;return 1;}
+        if(low3==1){v=sar(b,3)&7;br.read(6);if(!(v&4))v+=-7;out[0]=v;return 1;}
+        {int32_t sh=(sar(b,3)&1)+1;v=sar(b,4);br.read(7);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
+    case 21:
+        b=br.peek(7);if(!(b&1)){br.read(2);if(!(b&2)){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=0;return 1;}
+        if(!(b&2)){br.read(3);v=sar(b,1)&2;out[0]=v-1;return 1;}
+        if(!(b&0xC)){br.read(6);v=sar(b,4)&3;if(!(v&2))v+=-3;out[0]=v;return 1;}
+        {int32_t c=(sar(b,2)&3)-1;v=sar(b,4);if(!(v&4))v+=-7;br.read(7);out[0]=v<<c;return 1;}
+    case 22:
+        b=br.peek(6);if(!(b&1)){br.read(4);v=b&0xF;if(v==0){int r=std::min(4,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-4;return 1;}
+        {int32_t c=sar(b,1)&3;v=sar(b,3);if(!(v&4))v+=-7;br.read(6);out[0]=v<<c;return 1;}
+    case 23:
+        b=br.peek(6);if(!(b&1)){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-8;return 1;}
+        if(!(b&2)){v=sar(b,2)&7;br.read(5);if(!(v&4))v+=-7;out[0]=v<<1;return 1;}
+        {int32_t sh=(sar(b,2)&1)+2;v=sar(b,3);br.read(6);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
+    case 24:
+        b=br.peek(6);if(!(b&1)){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-8;return 1;}
+        {int32_t c=(sar(b,1)&3)+1;v=sar(b,3);if(!(v&4))v+=-7;br.read(6);out[0]=v<<c;return 1;}
+    case 25:
+        b=br.peek(6);low3=b&7;if(low3<2){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=(v&1)?sar(v,3):-sar(v,3);return 1;}
+        v=sar(b,3);if(!(v&4))v+=-7;br.read(6);out[0]=v<<(low3-2);return 1;
+    case 26:
+        b=br.peek(7);if(!(b&1)){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=sar(v,1)-8;return 1;}
+        {int32_t c=(sar(b,1)&7)+1;v=sar(b,4);if(!(v&4))v+=-7;br.read(7);out[0]=v<<c;return 1;}
+    case 27:
+        b=br.peek(9);low3=b&7;if(low3<2){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=(v&1)?sar(v,3):-sar(v,3);return 1;}
+        if(low3!=7){v=sar(b,3)&7;br.read(6);if(!(v&4))v+=-7;out[0]=v<<(low3-2);return 1;}
+        {int32_t sh=(sar(b,3)&7)+5;v=sar(b,6);br.read(9);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
+    case 28:
+        b=br.peek(10);low3=b&7;if(low3<2){br.read(5);v=b&0x1F;if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=(v&1)?sar(v,3):-sar(v,3);return 1;}
+        if(low3!=7){v=sar(b,3)&7;br.read(6);if(!(v&4))v+=-7;out[0]=v<<(low3-2);return 1;}
+        {int32_t sh=(sar(b,3)&0xF)+5;v=sar(b,7);br.read(10);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
+    case 29:{
+        b=br.peek(8);int32_t low5=b&0x1F;if(low5==2){br.read(5);out[0]=0;return 1;}
+        if(low5<2){if(b&1)v=(sar(b,5)&3)+1;else v=-1-(sar(b,5)&3);br.read(7);out[0]=v;return 1;}
+        v=sar(b,5);if(!(v&4))v+=-7;br.read(8);out[0]=v<<(low5-3);return 1;}
+    case 45: v=br.read(5);if(v==0){int r=std::min(5,rem);dec_zeros(out,r);return r;}out[0]=v-16;return 1;
+    case 46:
+        b=br.peek(7);if(!(b&1)){br.read(1);{int r=std::min(4,rem);dec_zeros(out,r);return r;}}
+        if(!(b&2)){br.read(2);out[0]=0;return 1;}br.read(7);v=sar(b,2);out[0]=sar(v,4)+v-0x10;return 1;
+    case 47:
+        b=br.peek(7);if(!(b&1)){br.read(2);if(!(b&2)){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=0;return 1;}
+        if(!(b&2)){br.read(3);v=sar(b,1)&2;out[0]=v-1;return 1;}
+        br.read(7);v=sar(b,2);out[0]=(v&0x10)?v-14:v-17;return 1;
+    case 48:
+        b=br.peek(7);low2=b&3;if(low2!=0){br.read(2);out[0]=low2-2;return 1;}
+        br.read(7);v=sar(b,2);out[0]=(v&0x10)?v-14:v-17;return 1;
+    case 49: v=br.read(6);if(v==0){int r=std::min(6,rem);dec_zeros(out,r);return r;}out[0]=v-32;return 1;
+    case 50:
+        b=br.peek(8);if(!(b&1)){br.read(2);if(!(b&2)){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=0;return 1;}
+        if(!(b&2)){br.read(3);v=sar(b,1)&2;out[0]=v-1;return 1;}
+        br.read(8);v=sar(b,2);out[0]=(v&0x20)?v-30:v-33;return 1;
+    case 51:
+        b=br.peek(8);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        if(low3==2){br.read(4);out[0]=(b&8)?3:-3;return 1;}
+        if(low3&1){br.read(8);out[0]=sar(b,3)+4;return 1;}br.read(8);out[0]=-4-sar(b,3);return 1;
+    case 52: v=br.read(7);if(v==0){int r=std::min(7,rem);dec_zeros(out,r);return r;}out[0]=v-64;return 1;
+    case 53: v=br.read(8);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-128;return 1;
+    case 54: v=br.read(9);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-256;return 1;
+    case 55: v=br.read(10);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-512;return 1;
+    case 56: v=br.read(11);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-1024;return 1;
+    case 57: v=br.read(16);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-0x8000;return 1;
+    case 58: v=br.read(24);if(v==0){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=v-0x800000;return 1;
+    case 59:{uint32_t u=br.read(32);if(u==0x80000000u){int r=std::min(8,rem);dec_zeros(out,r);return r;}out[0]=(int32_t)u;return 1;}
+    default: out[0]=0; return 1;
+    }
 }
 
-// ── Full parse ────────────────────────────────────────────────────────────────
+static void decode_channel(BitReader& br, int n, int codec, int32_t* out) {
+    if (codec==0||codec==30||codec==31||codec==60||codec==61||codec==62||codec==63){dec_zeros(out,n);return;}
+    if (codec>=32&&codec<=44){decode_channel(br,n,codec-32,out);return;}
+    int pos=0; while(pos<n) pos+=dec_one(br,n-pos,codec,out+pos);
+}
 
-bool parse_animation(AnimClip& clip) {
-    if (clip.path.empty()) return false;
-
-    std::ifstream f(clip.path, std::ios::binary);
-    if (!f) return false;
-    std::vector<uint8_t> data(
-        (std::istreambuf_iterator<char>(f)),
-        std::istreambuf_iterator<char>()
+static glm::quat qmul(const glm::quat& a, const glm::quat& b) {
+    return glm::quat(
+        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w
     );
+}
 
-    if (!parse_header(data, clip)) return false;
+// ============================================================
+// Decode all frames — Hamilton multiply chain from rest pose
+// ============================================================
+void AnimClip::decode_all_frames() const {
+    if (frames_decoded) return;
+    frames_decoded = true;
+    cached_frames.assign(frame_count, std::vector<BonePose>(n_bones));
 
-    const size_t stream_start = 0x14c;
-    if (data.size() <= stream_start) return false;
+    // Fill ALL bones with rest pose (inactive bones keep this)
+    for (int f = 0; f < frame_count; f++)
+        for (int bi = 0; bi < n_bones; bi++)
+            if (bi < (int)rest_pose.size())
+                cached_frames[f][bi].q = rest_pose[bi];
 
-    const uint8_t* stream    = data.data() + stream_start;
-    const size_t   stream_len = data.size() - stream_start;
-    const uint32_t tc         = clip.track_count;
-    const size_t   base_size  = (size_t)tc * 9;
+    for (auto& sec : sections) {
+        if (sec.frame_count <= 0 || sec.n_active <= 0) continue;
 
-    clip.tracks.resize(tc);
+        BitReader br(sec.bitstream.data(), sec.bitstream.size(),
+                     sec.bitstream_bit_offset / 8, sec.bitstream_bit_offset % 8);
 
-    // ── Base track records: tc * 9 bytes ──────────────────────────────────
-    // [uint8 type][float32 f0][float32 f1]
-    // f0 = confirmed correct frame-0 value.
-    // f1 = motion range (0 for constant tracks).
-    if (stream_len >= base_size) {
-        for (uint32_t i = 0; i < tc; ++i) {
-            const uint8_t* rec = stream + i * 9;
-            clip.tracks[i].type = rec[0];
-            clip.tracks[i].f0   = rf32(rec + 1);
-            clip.tracks[i].f1   = rf32(rec + 5);
-        }
-    } else {
-        // Compact format (some COP files have stream_len < base_size).
-        // Parse what we can; remainder stays zero-initialised.
-        size_t n = stream_len / 9;
-        for (size_t i = 0; i < n && i < tc; ++i) {
-            const uint8_t* rec = stream + i * 9;
-            clip.tracks[i].type = rec[0];
-            clip.tracks[i].f0   = rf32(rec + 1);
-            clip.tracks[i].f1   = rf32(rec + 5);
-        }
-    }
+        int nf = sec.frame_count;
+        int na = sec.n_active;
 
-    // ── Tail descriptor: [4, N_frames] pairs at end of stream ─────────────
-    // One entry per variable (animated) track.  Always 6 in observed data.
-    if (stream_len >= 8) {
-        int n_tail = 0;
-        const uint8_t* p = stream + stream_len - 8;
-        while (p >= stream + base_size) {
-            uint32_t a = ru32(p);
-            uint32_t b = ru32(p + 4);
-            if (a == 4 && b == (uint32_t)clip.frame_count) {
-                ++n_tail;
-                p -= 8;
-            } else {
-                break;
+        for (int bi = 0; bi < na; bi++) {
+            int cx = sec.codec_x[bi], cy = sec.codec_y[bi], cz = sec.codec_z[bi];
+            int32_t dx[512], dy[512], dz[512];
+            decode_channel(br, nf, cx, dx);
+            decode_channel(br, nf, cy, dy);
+            decode_channel(br, nf, cz, dz);
+
+            int skel_idx = (bi < 24) ? BC_PALETTE[bi] : bi;
+            float skel_f = (skel_idx < 60) ? SKEL_BONE_SCALE[skel_idx] : 0.001f;
+            float eff_scale = std::abs(skel_f) * qscale;
+
+            // Hamilton chain starts from rest pose — output is absolute NAL quaternion
+            glm::quat prev(1, 0, 0, 0);
+            if (bi < (int)rest_pose.size())
+                prev = rest_pose[bi];
+
+            int32_t sx = 0, sy = 0, sz = 0;
+            for (int f = 0; f < nf; f++) {
+                sx += dx[f]; sy += dy[f]; sz += dz[f];
+                float fx = (float)sx * eff_scale;
+                float fy = (float)sy * eff_scale;
+                float fz = (float)sz * eff_scale;
+
+                float sq = fx*fx + fy*fy + fz*fz;
+                float fw = (sq < 1.0f) ? std::sqrt(1.0f - sq) : 0.0f;
+                glm::quat cur(fw, fx, fy, fz);
+
+                prev = qmul(cur, prev);
+
+                int abs_f = sec.frame_start + f;
+                if (abs_f < frame_count && bi < n_bones)
+                    cached_frames[abs_f][bi].q = prev;
             }
         }
-        clip.n_variable_tracks = n_tail;
-        clip.tail.resize(n_tail);
-        p = stream + stream_len - (size_t)n_tail * 8;
-        for (int i = 0; i < n_tail; ++i, p += 8)
-            clip.tail[i] = { ru32(p), ru32(p + 4) };
+    }
+}
 
-        // ── Extra keyframe region (NAL entropy-coded deltas, decode TODO) ──
-        size_t tail_off = stream_len - (size_t)n_tail * 8;
-        if (tail_off > base_size) {
-            size_t extra_len = tail_off - base_size;
-            clip.extra_kf_data.assign(
-                stream + base_size,
-                stream + base_size + extra_len);
+std::vector<BonePose> AnimClip::sample_pose(float t) const {
+    if (!loaded || sections.empty()) return std::vector<BonePose>(n_bones);
+    decode_all_frames();
+    float clamped = looping ? std::fmod(t, duration) : std::clamp(t, 0.f, duration);
+    if (clamped < 0) clamped += duration;
+    int frame = std::clamp((int)(clamped * fps), 0, frame_count - 1);
+    if (frame < (int)cached_frames.size()) return cached_frames[frame];
+    return std::vector<BonePose>(n_bones);
+}
+
+// ============================================================
+// File parsing
+// ============================================================
+void parse_animation(AnimClip& clip) {
+    auto data = read_file(clip.path);
+    if (data.size() < 0x120) { clip.loaded = false; return; }
+    const uint8_t* d = data.data();
+    size_t sz = data.size();
+    if (rd<uint32_t>(d, 0) != 0x00010101) { clip.loaded = false; return; }
+
+    clip.looping     = rd<uint32_t>(d, 0xA4) != 0;
+    clip.duration    = rd<float>(d, 0xA8);
+    clip.fps         = rd<float>(d, 0xB0);
+    clip.frame_count = rd<uint32_t>(d, 0xB4);
+    uint32_t ref_size  = rd<uint32_t>(d, 0xC4);
+    uint32_t sec_count = rd<uint32_t>(d, 0xD4);
+    uint32_t max_fps   = rd<uint32_t>(d, 0xD8);
+    clip.qscale = rd<float>(d, 0x100);
+
+    size_t sec_table = 0x100 + ref_size;
+    if (sec_table + sec_count * 4 > sz) { clip.loaded = false; return; }
+
+    std::vector<uint32_t> sec_offsets(sec_count);
+    for (uint32_t i = 0; i < sec_count; i++)
+        sec_offsets[i] = rd<uint32_t>(d, sec_table + i * 4);
+
+    size_t sec_data_base = sec_table + sec_count * 4;
+
+    clip.n_bones     = 24;
+    clip.track_count = 72;
+    clip.sections.resize(sec_count);
+    clip.frames_decoded = false;
+    clip.cached_frames.clear();
+
+    for (uint32_t si = 0; si < sec_count; si++) {
+        size_t sec_start = sec_data_base + sec_offsets[si];
+        size_t sec_end = (si + 1 < sec_count) ? sec_data_base + sec_offsets[si + 1] : sz;
+        if (sec_start >= sz) continue;
+        int frames_in_sec = (int)std::min((uint32_t)(clip.frame_count - si * max_fps), max_fps);
+        if (frames_in_sec <= 0) continue;
+
+        auto& sec = clip.sections[si];
+        sec.frame_start = (int)(si * max_fps);
+        sec.frame_count = frames_in_sec;
+        sec.n_active = d[sec_start];
+        if (sec.n_active > clip.n_bones) sec.n_active = clip.n_bones;
+
+        sec.codec_x.resize(sec.n_active);
+        sec.codec_y.resize(sec.n_active);
+        sec.codec_z.resize(sec.n_active);
+
+        BitReader hdr(d, sz, sec_start + 1);
+        for (int bi = 0; bi < sec.n_active; bi++) {
+            sec.codec_x[bi] = (uint8_t)hdr.read(6);
+            sec.codec_y[bi] = (uint8_t)hdr.read(6);
+            sec.codec_z[bi] = (uint8_t)hdr.read(6);
         }
+
+        size_t bit_off = hdr.tell() - sec_start * 8;
+        sec.bitstream.assign(d + sec_start, d + std::min(sec_end, sz));
+        sec.bitstream_bit_offset = bit_off;
     }
 
     clip.loaded = true;
-    return true;
+    int max_active = 0;
+    for (auto& s : clip.sections) max_active = std::max(max_active, s.n_active);
+    std::cout << "[ANIM] '" << clip.name << "': "
+              << clip.frame_count << "F " << sec_count << "sec "
+              << max_active << "/" << clip.n_bones << " bones "
+              << "qs=" << clip.qscale << " "
+              << (clip.looping ? "loop" : "once") << "\n";
 }
-
-// ── scan_animations ───────────────────────────────────────────────────────────
 
 std::vector<AnimClip> scan_animations(const std::string& folder) {
     std::vector<AnimClip> clips;
-    if (folder.empty()) return clips;
+    namespace fs = std::filesystem;
+    if (!fs::is_directory(folder)) return clips;
 
-    int n_dat = 0, n_ok = 0;
-    std::error_code ec;
-    for (auto& entry : fs::directory_iterator(folder, ec)) {
+    for (auto& entry : fs::directory_iterator(folder)) {
         if (!entry.is_regular_file()) continue;
-        auto ext = entry.path().extension().string();
-        for (auto& c : ext) c = (char)tolower((unsigned char)c);
+        std::string path = entry.path().string();
+        std::string stem = entry.path().stem().string();
+        std::string ext  = entry.path().extension().string();
+        for (auto& c : ext) c = tolower(c);
         if (ext != ".dat") continue;
-        ++n_dat;
+        if (stem.size() < 3) continue;
+        std::string upper = stem;
+        for (auto& c : upper) c = toupper(c);
+        if (upper.substr(0, 2) != "BC") continue;
+        if (upper.find("BLACK_CAT") != std::string::npos) continue;
+
+        std::ifstream f(path, std::ios::binary);
+        if (!f) continue;
+        uint32_t ver = 0;
+        f.read(reinterpret_cast<char*>(&ver), 4);
+        if (ver != 0x00010101) continue;
 
         AnimClip clip;
-        clip.path = entry.path().string();
-        clip.name = entry.path().stem().string();
-
-        // Quick header scan (no track data)
-        std::ifstream f(clip.path, std::ios::binary);
-        if (!f) continue;
-        std::vector<uint8_t> hdr(0x150, 0);
-        f.read(reinterpret_cast<char*>(hdr.data()), (std::streamsize)hdr.size());
-        if ((size_t)f.gcount() < 0x150) continue;
-        if (!parse_header(hdr, clip)) continue;
-
-        ++n_ok;
+        clip.name = stem; clip.path = path;
+        f.seekg(0xA4); uint32_t lf=0; f.read((char*)&lf,4); clip.looping=lf!=0;
+        f.seekg(0xA8); float dur=0; f.read((char*)&dur,4); clip.duration=dur;
+        f.seekg(0xB0); float fp=0;  f.read((char*)&fp,4);  clip.fps=fp;
+        f.seekg(0xB4); uint32_t fc=0; f.read((char*)&fc,4); clip.frame_count=fc;
+        clip.n_bones=24; clip.track_count=72;
         clips.push_back(std::move(clip));
     }
-
-    std::cout << "scan_animations: " << n_dat << " .dat files, "
-              << n_ok << " valid anim clips in " << folder << "\n";
-
     std::sort(clips.begin(), clips.end(),
-        [](const AnimClip& a, const AnimClip& b){ return a.name < b.name; });
+              [](const AnimClip& a, const AnimClip& b) { return a.name < b.name; });
     return clips;
 }

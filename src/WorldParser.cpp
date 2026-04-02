@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <unordered_set>
+#include <unordered_map>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -119,10 +121,44 @@ WorldData* parse_world(const std::string& path) {
         i += 0x100;
     }
 
+    // ── Post-process: propagate correct asset names across instance chains ────
+    // Instance records form linked chains. find_asset_name often picks up the
+    // NEXT instance's name instead of the real mesh reference because the search
+    // window overlaps the next record. Only the first record of each type has
+    // the correct asset embedded.
+    // Fix: a "real" asset is one whose name does NOT appear as any instance name.
+    // Group instances by base name (strip trailing digits) and propagate.
+    {
+        std::unordered_set<std::string> inst_names;
+        for (auto& inst : wd->instances)
+            inst_names.insert(inst.name);
+
+        // base_type → correct asset (first real one found wins)
+        std::unordered_map<std::string, std::string> base_asset;
+        for (auto& inst : wd->instances) {
+            if (inst.asset_name.empty()) continue;
+            std::string base = inst.name;
+            while (!base.empty() && std::isdigit((unsigned char)base.back()))
+                base.pop_back();
+            if (base_asset.count(base)) continue; // already have one
+            if (inst_names.find(inst.asset_name) == inst_names.end())
+                base_asset[base] = inst.asset_name;
+        }
+        for (auto& inst : wd->instances) {
+            std::string base = inst.name;
+            while (!base.empty() && std::isdigit((unsigned char)base.back()))
+                base.pop_back();
+            auto it = base_asset.find(base);
+            if (it != base_asset.end())
+                inst.asset_name = it->second;
+        }
+    }
+
     // ── Prop type table: runs of [4B hash][28B lowercase_name] ───────────────
     // Prop type table: entries of [hash(4)+name(28)], stride 32.
-    // Real prop names END in digits: "sg_stor_15d000", "s_strtlampb000" etc.
+    // Real prop names END in digits: "sg_stor_15d000", "blg30x1000", etc.
     // Find the LARGEST such run to avoid false positives.
+    // NOTE: no underscore requirement — building meshes (blg*, apt*, roof*) lack them.
     size_t prop_table_off   = 0;
     int    prop_table_count = 0;
     for (size_t i = 32; i + 64 <= sz; i += 4) {
@@ -135,7 +171,6 @@ WorldData* parse_world(const std::string& path) {
             if (s.size() < 4) break;
             // Must end in at least one digit (real asset names: "sg_stor_15d000")
             if (!std::isdigit((unsigned char)s.back())) break;
-            if (s.find('_') == std::string::npos) break;
             ++count; off += 32;
         }
         if (count > prop_table_count) {
@@ -145,46 +180,27 @@ WorldData* parse_world(const std::string& path) {
     }
 
     if (prop_table_count > 0) {
-        // The combined run includes both the sc_/c21_ detail table AND the trailing
-        // blg*/apt* building table.  Placement records index into the BUILDING table only.
-        // Extract that sub-table (entries whose names start with "blg" or "apt").
-        size_t blg_table_off   = 0;
-        int    blg_table_count = 0;
-        for (int i = 0; i < prop_table_count; ++i) {
-            size_t off = prop_table_off + i * 32 + 4;
-            std::string s = rstr(d, sz, off, 28);
-            if (s.size() >= 3 && (s.substr(0,3) == "blg" || s.substr(0,3) == "apt")) {
-                if (blg_table_off == 0) blg_table_off = prop_table_off + i * 32;
-                ++blg_table_count;
-            }
-        }
+        // Use the full prop table: trees, bushes, stoops, signs, vents, awnings,
+        // alley details, fire escapes, storefronts, lamps, buildings -- all of it.
+        // type_idx from placement records indexes directly into this flat list.
+        for (int i = 0; i < prop_table_count; ++i)
+            wd->prop_types.push_back(rstr(d, sz, prop_table_off + i * 32 + 4, 28));
 
-        // Fall back to the full combined table if no blg/apt sub-table found
-        if (blg_table_count == 0) {
-            blg_table_off   = prop_table_off;
-            blg_table_count = prop_table_count;
-        }
-
-        for (int i = 0; i < blg_table_count; ++i)
-            wd->prop_types.push_back(rstr(d, sz, blg_table_off + i * 32 + 4, 28));
-
-        // Placement records start after the full combined table.
-        // Layout: [...][type_idx u8][0x09 u8][pad u8][yaw_lo u8][yaw_hi u8... no:
-        // actual: d[off-1]=type_idx, d[off]=0x09, d[off+2..3]=yaw LE u16, d[off+4/8/12]=x/y/z
+        // Placement records start after the full prop table.
         const size_t STRIDE     = 0x34;
         const size_t scan_start = prop_table_off + prop_table_count * 32;
 
         std::map<int,int> tidx_hist;
         for (size_t off = scan_start; off + STRIDE <= sz; off += 4) {
-            if (off < 1) continue;
             if (d[off] != 0x09) continue;
-            uint8_t type_idx = d[off - 1];
-            if (type_idx >= (uint8_t)blg_table_count) continue;
+            if (d[off + 1] != 0x00) continue;
             uint16_t yaw_raw = rh(d, off + 2);
             if (yaw_raw > 359) continue;
             float x = rf(d, off + 4), y = rf(d, off + 8), z = rf(d, off + 12);
             if (!plausible_world(x) || !plausible_world(y) || !plausible_world(z)) continue;
             if (std::fabs(x) + std::fabs(z) < 10.f) continue;
+            uint8_t type_idx = d[off + 18];
+            if (type_idx >= (uint8_t)prop_table_count) continue;
             tidx_hist[(int)type_idx]++;
             wd->props.push_back({ (int)type_idx, (float)yaw_raw, x, y, z });
             off += STRIDE - 4;
@@ -201,6 +217,5 @@ WorldData* parse_world(const std::string& path) {
               << "  prop_types: " << wd->prop_types.size() << "\n"
               << "  props     : " << wd->props.size()     << "\n";
 
-    if (wd->instances.empty() && wd->props.empty()) { delete wd; return nullptr; }
     return wd;
 }
