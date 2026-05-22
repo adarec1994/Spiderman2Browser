@@ -20,6 +20,7 @@ struct SubmeshInfo {
 
 struct UIState {
     std::string              folder;
+    std::string              xiso_path;     // last picked .xiso (may be empty)
     std::vector<std::string> files;        // .xbx model files
     std::vector<std::string> world_files;  // bare .dat world area files
     int                      selected    = -1;
@@ -27,6 +28,9 @@ struct UIState {
     std::string              status_msg;
     bool                     has_model   = false;
     std::vector<SubmeshInfo> submeshes;
+
+    // Splash screen: shown when no source is configured yet
+    bool                     show_splash = false;
 
     // Animation
     std::vector<std::string> anim_names;
@@ -58,6 +62,7 @@ struct UIState {
 
 struct UICallbacks {
     std::function<void(const std::string&)>      on_scan_folder;
+    std::function<void(const std::string&)>      on_select_xiso; // user picked .xiso file
     std::function<void(int)>                     on_select_file;
     std::function<void()>                        on_reset_camera;
     std::function<void(int)>                     on_select_anim;
@@ -73,11 +78,19 @@ class UI {
 public:
     static int PANEL_W;
 
+    // Persistent config (xbx_viewer.cfg). Stores xiso path + folder path
+    // as key=value lines. Backward compatible with the old single-line
+    // folder-only format.
+    static void save_config(const std::string& xiso_path, const std::string& folder);
+    static void load_config(std::string& xiso_path, std::string& folder);
+
+    // Legacy aliases (kept so old call sites keep working).
     static void save_folder(const std::string& folder);
     static std::string load_folder();
 
     void draw(UIState& state, UICallbacks& cb,
               bool& wireframe, bool& show_grid, bool& show_skel, bool& show_uv,
               int win_h);
+    void draw_splash(UIState& state, UICallbacks& cb);
     void draw_mat_editor(UIState& state, UICallbacks& cb);
 };

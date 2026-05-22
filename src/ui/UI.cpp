@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -12,99 +13,231 @@ static constexpr int ANIM_W = 220;
 
 static const char* CFG_PATH = "xbx_viewer.cfg";
 
-void UI::save_folder(const std::string& f) {
-    if (std::ofstream o(CFG_PATH); o) o << f;
+// ── Config (xbx_viewer.cfg) ──────────────────────────────────────────────────
+// New format: lines of "key=value". Backward compatible with the old single
+// folder-path line.
+void UI::save_config(const std::string& xiso_path, const std::string& folder) {
+    std::ofstream o(CFG_PATH);
+    if (!o) return;
+    if (!xiso_path.empty()) o << "xiso=" << xiso_path << "\n";
+    if (!folder.empty())    o << "folder=" << folder << "\n";
 }
 
-std::string UI::load_folder() {
+void UI::load_config(std::string& xiso_path, std::string& folder) {
+    xiso_path.clear();
+    folder.clear();
     std::ifstream f(CFG_PATH);
-    std::string s; std::getline(f, s); return s;
+    if (!f) return;
+    std::string line;
+    bool first = true;
+    while (std::getline(f, line)) {
+        // strip trailing \r (windows line endings written elsewhere)
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) { first = false; continue; }
+
+        auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            // legacy: single line == folder path
+            if (first) folder = line;
+            first = false;
+            continue;
+        }
+        std::string k = line.substr(0, eq);
+        std::string v = line.substr(eq + 1);
+        if      (k == "xiso")   xiso_path = v;
+        else if (k == "folder") folder    = v;
+        first = false;
+    }
 }
 
-void UI::draw(UIState& state, UICallbacks& cb,
-              bool& wireframe, bool& show_grid, bool& show_skel, bool& show_uv,
-              int) {
+void UI::save_folder(const std::string& f)     { save_config("", f); }
+std::string UI::load_folder() {
+    std::string x, f; load_config(x, f); return f;
+}
 
-    float dh   = ImGui::GetIO().DisplaySize.y;
-    float dw   = ImGui::GetIO().DisplaySize.x;
-    float line = ImGui::GetTextLineHeightWithSpacing();
-    float sy   = ImGui::GetStyle().ItemSpacing.y;
+// ── Splash screen ────────────────────────────────────────────────────────────
+// Full-window welcome that prompts for the .xiso (or a folder fallback).
+// Persisted via save_config so future launches auto-load.
+void UI::draw_splash(UIState& state, UICallbacks& cb) {
+    float dw = ImGui::GetIO().DisplaySize.x;
+    float dh = ImGui::GetIO().DisplaySize.y;
 
-    // ── Pinned bottom options panel (left side) ───────────────────────────────
-    float bot_h = line * 4.f + ImGui::GetStyle().FramePadding.y * 8 + sy * 5;
-    ImGui::SetNextWindowPos({0, dh - bot_h});
-    ImGui::SetNextWindowSize({(float)PANEL_W, bot_h});
-    ImGui::Begin("##opts", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoScrollbar);
-    ImGui::Checkbox("Wireframe", &wireframe);
-    ImGui::Checkbox("Grid",      &show_grid);
-    ImGui::Checkbox("Skeleton",  &show_skel);
-    ImGui::Checkbox("UV",        &show_uv);
-    if (ImGui::Button("Reset Camera")) cb.on_reset_camera();
-    // Texture preview button — only when a submesh with a texture is selected
-    if (state.preview_tex_id) {
-        ImGui::SameLine();
-        if (ImGui::Button("Tex Preview"))
-            state.show_tex_preview = !state.show_tex_preview;
-    }
-    ImGui::End();
-
-    // ── Left panel: tabbed ────────────────────────────────────────────────────
+    // Dark full-window backdrop
     ImGui::SetNextWindowPos({0, 0});
-    ImGui::SetNextWindowSize({(float)PANEL_W, dh - bot_h});
-    ImGui::Begin("##panel", nullptr,
+    ImGui::SetNextWindowSize({dw, dh});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.08f, 0.10f, 1.0f));
+    ImGui::Begin("##splash_bg", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
 
-    ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "XBX Model Viewer");
-    ImGui::Separator();
+    const float card_w = std::min(560.f, dw * 0.9f);
+    const float card_h = 320.f;
+    ImVec2 origin{(dw - card_w) * 0.5f, (dh - card_h) * 0.5f};
 
-    // ── Folder bar ────────────────────────────────────────────────────────────
-    static char fbuf[1024] = {};
-    if (state.folder != std::string(fbuf))
-        strncpy(fbuf, state.folder.c_str(), 1023);
+    // Card backdrop
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin, {origin.x + card_w, origin.y + card_h},
+                      IM_COL32(28, 30, 36, 255), 8.f);
+    dl->AddRect(origin, {origin.x + card_w, origin.y + card_h},
+                IM_COL32(70, 90, 130, 200), 8.f, 0, 1.5f);
 
-    float bw = ImGui::CalcTextSize("Browse").x + ImGui::GetStyle().FramePadding.x * 2 + 4;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - ImGui::GetStyle().ItemSpacing.x);
-    if (ImGui::InputText("##fld", fbuf, 1024)) state.folder = fbuf;
-    ImGui::SameLine();
-    if (ImGui::Button("Browse")) {
+    ImGui::SetCursorPos({origin.x + 32.f, origin.y + 24.f});
+    ImGui::BeginGroup();
+
+    // Title — scaled up
+    ImGui::SetWindowFontScale(2.0f);
+    ImGui::TextColored({0.65f, 0.85f, 1.f, 1.f}, "XBX Model Viewer");
+    ImGui::SetWindowFontScale(1.0f);
+
+    ImGui::TextDisabled("Spider-Man 2 / Xbox model and world viewer");
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + card_w - 64.f);
+    ImGui::TextWrapped("Select your game's .xiso file to begin. The viewer scans the parent folder for .xbx models, animations, and world data.");
+    ImGui::PopTextWrapPos();
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    // Primary CTA
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.55f, 0.90f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
+    if (ImGui::Button("Locate .xiso file...", {card_w - 64.f, 38.f})) {
         IGFD::FileDialogConfig cfg;
-        cfg.path = state.folder.empty() ? "." : state.folder;
+        cfg.path  = state.xiso_path.empty()
+                      ? (state.folder.empty() ? "." : state.folder)
+                      : fs::path(state.xiso_path).parent_path().string();
         cfg.flags = ImGuiFileDialogFlags_Modal;
-        ImGuiFileDialog::Instance()->OpenDialog("FD", "Choose Folder", nullptr, cfg);
+        ImGuiFileDialog::Instance()->OpenDialog("SPLASH_XISO",
+            "Locate .xiso", ".xiso,.iso,.*", cfg);
+    }
+    ImGui::PopStyleColor(3);
+
+    ImGui::Spacing();
+
+    if (ImGui::Button("Or pick a folder instead...", {card_w - 64.f, 30.f})) {
+        IGFD::FileDialogConfig cfg;
+        cfg.path  = state.folder.empty() ? "." : state.folder;
+        cfg.flags = ImGuiFileDialogFlags_Modal;
+        ImGuiFileDialog::Instance()->OpenDialog("SPLASH_FOLDER",
+            "Choose Folder", nullptr, cfg);
     }
 
-    float fdw = std::min(700.f, dw * 0.8f);
-    float fdh = std::min(450.f, dh * 0.7f);
-    ImGui::SetNextWindowPos({(dw-fdw)*0.5f,(dh-fdh)*0.5f}, ImGuiCond_Always);
-    if (ImGuiFileDialog::Instance()->Display("FD", ImGuiWindowFlags_NoCollapse, {fdw,fdh},{fdw,fdh})) {
+    if (!state.xiso_path.empty() || !state.folder.empty()) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Previously used:");
+        if (!state.xiso_path.empty())
+            ImGui::TextDisabled("  %s", state.xiso_path.c_str());
+        else
+            ImGui::TextDisabled("  %s", state.folder.c_str());
+    }
+
+    ImGui::EndGroup();
+    ImGui::End();
+    ImGui::PopStyleColor();
+
+    // ── File dialogs ────────────────────────────────────────────────────────
+    float fdw = std::min(720.f, dw * 0.8f);
+    float fdh = std::min(480.f, dh * 0.75f);
+
+    ImGui::SetNextWindowPos({(dw - fdw) * 0.5f, (dh - fdh) * 0.5f}, ImGuiCond_Always);
+    if (ImGuiFileDialog::Instance()->Display("SPLASH_XISO",
+            ImGuiWindowFlags_NoCollapse, {fdw, fdh}, {fdw, fdh})) {
         if (ImGuiFileDialog::Instance()->IsOk()) {
-            state.folder = ImGuiFileDialog::Instance()->GetCurrentPath();
-            strncpy(fbuf, state.folder.c_str(), 1023);
-            save_folder(state.folder);
-            cb.on_scan_folder(state.folder);
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            if (cb.on_select_xiso) cb.on_select_xiso(path);
         }
         ImGuiFileDialog::Instance()->Close();
     }
 
-    if (ImGui::Button("Scan") && !state.folder.empty()) {
-        save_folder(state.folder);
-        cb.on_scan_folder(state.folder);
+    ImGui::SetNextWindowPos({(dw - fdw) * 0.5f, (dh - fdh) * 0.5f}, ImGuiCond_Always);
+    if (ImGuiFileDialog::Instance()->Display("SPLASH_FOLDER",
+            ImGuiWindowFlags_NoCollapse, {fdw, fdh}, {fdw, fdh})) {
+        if (ImGuiFileDialog::Instance()->IsOk()) {
+            std::string path = ImGuiFileDialog::Instance()->GetCurrentPath();
+            state.folder = path;
+            save_config(state.xiso_path, path);
+            if (cb.on_scan_folder) cb.on_scan_folder(path);
+            state.show_splash = false;
+        }
+        ImGuiFileDialog::Instance()->Close();
     }
+}
+
+// ── Main draw ────────────────────────────────────────────────────────────────
+void UI::draw(UIState& state, UICallbacks& cb,
+              bool& wireframe, bool& show_grid, bool& show_skel, bool& show_uv,
+              int) {
+
+    float dh = ImGui::GetIO().DisplaySize.y;
+    float dw = ImGui::GetIO().DisplaySize.x;
+
+    // Splash takes over the whole window
+    if (state.show_splash) { draw_splash(state, cb); return; }
+
+    float line = ImGui::GetTextLineHeightWithSpacing();
+    float sy   = ImGui::GetStyle().ItemSpacing.y;
+    float fpy  = ImGui::GetStyle().FramePadding.y;
+
+    // ── Single left panel, split vertically into BeginChild sections ─────────
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize({(float)PANEL_W, dh});
+    ImGui::Begin("##panel", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "XBX Model Viewer");
     ImGui::Separator();
 
-    // ── Tabs ──────────────────────────────────────────────────────────────────
+    // ── Source bar (.xiso / folder + change button) ─────────────────────────
+    std::string src_label;
+    if (!state.xiso_path.empty())
+        src_label = "ISO: " + fs::path(state.xiso_path).filename().string();
+    else if (!state.folder.empty())
+        src_label = "Folder: " + fs::path(state.folder).filename().string();
+    else
+        src_label = "(no source)";
+
+    float chg_w = ImGui::CalcTextSize("Change").x + ImGui::GetStyle().FramePadding.x * 2 + 6;
+    ImGui::TextDisabled("%s", src_label.c_str());
+    if (!state.xiso_path.empty() && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", state.xiso_path.c_str());
+    else if (!state.folder.empty() && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", state.folder.c_str());
+
+    // Right-align the "Change" button on the same line
+    float src_line_w = ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x;
+    ImGui::SameLine(src_line_w - chg_w);
+    if (ImGui::SmallButton("Change"))
+        state.show_splash = true;
+
+    ImGui::Separator();
+
+    // ── Compute heights for stacked sections ────────────────────────────────
+    // Options block: 2 checkbox rows + 1 button row
+    const float opts_h = line * 2.f + fpy * 4 + sy * 3 + 32.f;
+    // Submesh block: only when a model is loaded
+    const bool show_sm = state.has_model && !state.submeshes.empty();
+    float sm_h  = show_sm ? std::clamp(dh * 0.28f, 120.f, 260.f) : 0.f;
+    // Tabs block: remaining space
+    float used  = opts_h + (show_sm ? sm_h + sy * 2 + 6.f : 0.f) + sy * 2 + 6.f;
+    float tabs_h = std::max(120.f, ImGui::GetContentRegionAvail().y - used);
+
+    // ── Tabs (Models / World) ───────────────────────────────────────────────
+    ImGui::BeginChild("##tabs_section", {0, tabs_h}, false);
     if (ImGui::BeginTabBar("##tabs")) {
 
-        // ── Models tab ────────────────────────────────────────────────────────
+        // ── Models tab ───────────────────────────────────────────────────
         if (ImGui::BeginTabItem("Models")) {
-            // Header row: file count + status
             ImGui::TextDisabled("%d files", (int)state.files.size());
             if (!state.status_msg.empty()) {
-                bool err = state.status_msg.rfind("Error",0)==0 || state.status_msg.rfind("Failed",0)==0;
+                bool err = state.status_msg.rfind("Error", 0) == 0 ||
+                           state.status_msg.rfind("Failed", 0) == 0;
                 ImGui::SameLine();
                 ImGui::TextColored(err ? ImVec4{1,.3f,.3f,1} : ImVec4{.6f,.6f,.6f,1},
                                    "— %s", state.status_msg.c_str());
@@ -126,6 +259,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
                 if (fn.find(search_lo) != std::string::npos) filtered.push_back(i);
             }
 
+            ImGui::BeginChild("##files_scroll", {0, 0}, false);
             for (int i = 0; i < (int)filtered.size(); ++i) {
                 int idx = filtered[i];
                 std::string lbl = fs::path(state.files[idx]).filename().string()
@@ -133,21 +267,21 @@ void UI::draw(UIState& state, UICallbacks& cb,
                 if (ImGui::Selectable(lbl.c_str(), idx == state.selected) && idx != state.selected)
                     cb.on_select_file(idx);
             }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
-        // ── World tab ─────────────────────────────────────────────────────────
+        // ── World tab ────────────────────────────────────────────────────
         if (ImGui::BeginTabItem("World")) {
             int n_world = (int)state.world_files.size();
 
-            // Status / progress area
             if (state.world_load_progress >= 0.f) {
-                // Synchronous load: progress bar shows last reported state
                 char overlay[64];
-                snprintf(overlay, sizeof(overlay), "Loading... %s", state.world_load_status.c_str());
+                snprintf(overlay, sizeof(overlay), "Loading... %s",
+                         state.world_load_status.c_str());
                 ImGui::ProgressBar(state.world_load_progress, {-1, 0}, overlay);
             } else if (state.world_mode) {
-                ImGui::TextColored({0.4f,1.f,0.6f,1.f}, "WORLD ACTIVE");
+                ImGui::TextColored({0.4f, 1.f, 0.6f, 1.f}, "WORLD ACTIVE");
                 ImGui::TextDisabled("%d instances  %d props",
                     state.world_instance_count, state.world_prop_count);
                 if (!state.world_dat_path.empty()) {
@@ -159,7 +293,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
                 }
             }
 
-            // Load All button
             if (n_world > 0) {
                 if (ImGui::Button("Load All", {-1, 0}))
                     if (cb.on_load_all_worlds) cb.on_load_all_worlds();
@@ -169,13 +302,13 @@ void UI::draw(UIState& state, UICallbacks& cb,
             }
             ImGui::Separator();
 
-            // Search + list
             static char wsearch[128] = {};
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##wsearch", "Search...", wsearch, sizeof(wsearch));
             std::string wlo = wsearch;
             std::transform(wlo.begin(), wlo.end(), wlo.begin(), ::tolower);
 
+            ImGui::BeginChild("##worlds_scroll", {0, 0}, false);
             for (int i = 0; i < n_world; ++i) {
                 std::string fn = fs::path(state.world_files[i]).filename().string();
                 if (!wlo.empty()) {
@@ -185,56 +318,63 @@ void UI::draw(UIState& state, UICallbacks& cb,
                 }
                 bool active = state.world_mode &&
                               state.world_dat_path == state.world_files[i];
-                if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.4f,1.f,0.6f,1.f});
+                if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.4f, 1.f, 0.6f, 1.f});
                 std::string lbl = fn + "##w" + std::to_string(i);
                 if (ImGui::Selectable(lbl.c_str(), active))
                     if (cb.on_load_world_file) cb.on_load_world_file(i);
                 if (active) ImGui::PopStyleColor();
             }
+            ImGui::EndChild();
+
             ImGui::EndTabItem();
         }
 
         ImGui::EndTabBar();
     }
+    ImGui::EndChild();
+
+    // ── Submesh section (when model is loaded) ──────────────────────────────
+    if (show_sm) {
+        ImGui::Separator();
+        ImGui::BeginChild("##submesh_section", {0, sm_h}, false);
+        ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "Submeshes (%d)",
+                           (int)state.submeshes.size());
+
+        ImGui::BeginChild("##sm_scroll", {0, 0}, false);
+        for (int i = 0; i < (int)state.submeshes.size(); ++i) {
+            auto& sm = state.submeshes[i];
+            ImGui::PushID(i);
+            bool sel = (state.sel_submesh == i);
+            ImGui::TextColored(sel ? ImVec4{0.3f, 1.f, 0.4f, 1.f}
+                                   : ImVec4{0.8f, 0.8f, 0.8f, 1.f},
+                "SM%d", i);
+            ImGui::SameLine();
+            if (ImGui::Selectable(sm.mat_name.c_str(), sel))
+                state.sel_submesh = i;
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+    }
+
+    // ── Bottom: render options ──────────────────────────────────────────────
+    ImGui::Separator();
+    ImGui::BeginChild("##opts_section", {0, 0}, false);
+    ImGui::Checkbox("Wireframe", &wireframe);
+    ImGui::SameLine(); ImGui::Checkbox("Grid", &show_grid);
+    ImGui::Checkbox("Skeleton", &show_skel);
+    ImGui::SameLine(); ImGui::Checkbox("UV", &show_uv);
+    if (ImGui::Button("Reset Camera")) cb.on_reset_camera();
+    if (state.preview_tex_id) {
+        ImGui::SameLine();
+        if (ImGui::Button("Tex Preview"))
+            state.show_tex_preview = !state.show_tex_preview;
+    }
+    ImGui::EndChild();
 
     ImGui::End();
 
-    // ── Submesh panel — pinned below file list, above bottom bar ─────────────
-    if (state.has_model && !state.submeshes.empty()) {
-        float sm_h = dh - bot_h - (dh * 0.50f);
-        if (sm_h > 60.f) {
-            ImGui::SetNextWindowPos({0, dh - bot_h - sm_h});
-            ImGui::SetNextWindowSize({(float)PANEL_W, sm_h});
-            ImGui::Begin("##submesh", nullptr,
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                ImGuiWindowFlags_NoScrollbar);
-
-            ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Submeshes");
-            ImGui::Separator();
-
-            // List of submeshes (scrollable, fixed height)
-            float list_portion = (state.sel_submesh >= 0) ? sm_h * 0.5f : sm_h - 30.f;
-            ImGui::BeginChild("##smnames", ImVec2(0, list_portion), false);
-            static const char* prim_opts[] = { "TStrip", "TList", "QuadList", "TFan" };
-            for (int i = 0; i < (int)state.submeshes.size(); ++i) {
-                auto& sm = state.submeshes[i];
-                ImGui::PushID(i);
-                bool sel = (state.sel_submesh == i);
-                ImGui::TextColored(sel ? ImVec4{0.3f,1.f,0.4f,1.f} : ImVec4{0.8f,0.8f,0.8f,1.f},
-                    "SM%d", i);
-                ImGui::SameLine();
-                if (ImGui::Selectable(sm.mat_name.c_str(), sel))
-                    state.sel_submesh = i;
-                ImGui::PopID();
-            }
-            ImGui::EndChild();
-
-            ImGui::End();
-        }
-    }
-
-    // ── Face type overlay — top-right of viewport ─────────────────────────────
+    // ── Face type overlay — top-right of viewport ───────────────────────────
     if (state.has_model && state.sel_submesh >= 0 &&
         state.sel_submesh < (int)state.submeshes.size()) {
         auto& sm = state.submeshes[state.sel_submesh];
@@ -242,7 +382,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
         const float pad = 8.f;
         const float w   = 260.f;
         int n_cands = (int)sm.tex_candidates.size();
-        // height: info lines + prim combo + shader line + tex combo + candidate list
         int extra_lines = 2 + (n_cands > 0 ? n_cands : 1);
         const float h   = ImGui::GetTextLineHeightWithSpacing() * (4.f + extra_lines) + pad * 2.f;
         ImGui::SetNextWindowPos({dw - ANIM_W - w - pad, pad});
@@ -253,22 +392,18 @@ void UI::draw(UIState& state, UICallbacks& cb,
             ImGuiWindowFlags_NoMove       | ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        // Info line
         ImGui::TextDisabled("SM%d  prim=%u  %d tris",
             state.sel_submesh, sm.prim_raw, sm.tri_count);
         ImGui::TextDisabled("mat: %s", sm.mat_name.c_str());
 
-        // Shader type
-        ImGui::TextColored({0.6f,0.9f,0.6f,1.f}, "shader: %s",
+        ImGui::TextColored({0.6f, 0.9f, 0.6f, 1.f}, "shader: %s",
             sm.shader_type.empty() ? "(none)" : sm.shader_type.c_str());
 
-        // Prim type combo
         ImGui::Separator();
         ImGui::SetNextItemWidth(w - pad * 2.f);
         if (ImGui::Combo("##ftype", &sm.method_sel, prim_opts, 4))
             if (cb.on_prim_override) cb.on_prim_override(state.sel_submesh, sm.method_sel);
 
-        // Texture combo
         ImGui::Separator();
         if (n_cands > 0) {
             std::vector<const char*> cstrs;
@@ -294,10 +429,10 @@ void UI::draw(UIState& state, UICallbacks& cb,
     if (state.mat_editor_open)
         draw_mat_editor(state, cb);
 
-    // ── Floating texture preview ──────────────────────────────────────────────
+    // ── Floating texture preview ────────────────────────────────────────────
     if (state.show_tex_preview && state.preview_tex_id) {
         ImGui::SetNextWindowSize({300.f, 340.f}, ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowPos({dw*0.5f - 150.f, dh*0.5f - 170.f}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos({dw * 0.5f - 150.f, dh * 0.5f - 170.f}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Texture Preview", &state.show_tex_preview)) {
             ImGui::TextUnformatted(state.preview_tex_name.c_str());
             ImGui::Separator();
@@ -307,18 +442,17 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGui::End();
     }
 
-    // ── Right panel: animation list ───────────────────────────────────────────
+    // ── Right panel: animation list ─────────────────────────────────────────
     ImGui::SetNextWindowPos({dw - ANIM_W, 0});
     ImGui::SetNextWindowSize({(float)ANIM_W, dh});
     ImGui::Begin("##anim", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    ImGui::TextColored({1.f,0.8f,0.4f,1.f}, "Animations");
+    ImGui::TextColored({1.f, 0.8f, 0.4f, 1.f}, "Animations");
     ImGui::TextDisabled("%d clips", (int)state.anim_names.size());
     ImGui::Separator();
 
-    // Play controls
     if (state.anim_sel >= 0) {
         const char* btn_lbl = state.anim_playing ? "Stop##pb" : "Play##pb";
         if (ImGui::Button(btn_lbl)) {
@@ -331,7 +465,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
             if (cb.on_select_anim) cb.on_select_anim(state.anim_sel);
         }
 
-        // Progress bar
         float prog = (state.anim_dur > 0) ? (state.anim_time / state.anim_dur) : 0.f;
         char overlay[32];
         snprintf(overlay, sizeof(overlay), "%.2f / %.2fs", state.anim_time, state.anim_dur);
@@ -343,7 +476,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGui::Separator();
     }
 
-    // Clip list
     float anim_list_h = dh - ImGui::GetCursorPosY() - ImGui::GetStyle().WindowPadding.y;
     ImGui::BeginChild("##cliplist", {0, anim_list_h}, ImGuiChildFlags_Borders);
     ImGuiListClipper aclip;

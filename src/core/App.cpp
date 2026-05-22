@@ -606,16 +606,60 @@ bool App::init(int w, int h, const char* title) {
     m_renderer.init();
     setup_callbacks();
 
-    std::string saved = UI::load_folder();
-    if (!saved.empty() && fs::exists(saved)) {
-        m_ui_state.folder = saved;
-        scan_folder(saved);
+    // ── Resume from previous session ─────────────────────────────────────────
+    // Prefer the .xiso path; fall back to a saved folder. If neither resolves,
+    // show the splash screen so the user can pick a source.
+    std::string saved_xiso, saved_folder;
+    UI::load_config(saved_xiso, saved_folder);
+
+    if (!saved_xiso.empty() && fs::exists(saved_xiso)) {
+        m_ui_state.xiso_path = saved_xiso;
+        // If the .xiso is itself a directory (extracted dump), use it. Otherwise
+        // use its parent.
+        std::string folder = fs::is_directory(saved_xiso)
+                               ? saved_xiso
+                               : fs::path(saved_xiso).parent_path().string();
+        if (!folder.empty() && fs::exists(folder)) {
+            m_ui_state.folder = folder;
+            scan_folder(folder);
+        } else {
+            m_ui_state.show_splash = true;
+        }
+    } else if (!saved_folder.empty() && fs::exists(saved_folder)) {
+        // Legacy config: if the path ends in .xiso/.iso, treat it as the iso.
+        std::string ext = fs::path(saved_folder).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".xiso" || ext == ".iso")
+            m_ui_state.xiso_path = saved_folder;
+        m_ui_state.folder = saved_folder;
+        scan_folder(saved_folder);
+    } else {
+        m_ui_state.show_splash = true;
     }
     return true;
 }
 
 void App::setup_callbacks() {
-    m_ui_cb.on_scan_folder  = [this](const std::string& f){ scan_folder(f); };
+    m_ui_cb.on_scan_folder  = [this](const std::string& f){
+        m_ui_state.folder = f;
+        // Folder picked directly (not via .xiso) — clear the iso pointer
+        m_ui_state.xiso_path.clear();
+        UI::save_config("", f);
+        m_ui_state.show_splash = false;
+        scan_folder(f);
+    };
+    m_ui_cb.on_select_xiso  = [this](const std::string& xiso){
+        m_ui_state.xiso_path = xiso;
+        // If the .xiso is actually a directory (common for extracted Xbox dumps
+        // named *.xiso), use it directly. Otherwise scan its parent.
+        std::string folder = fs::is_directory(xiso)
+                               ? xiso
+                               : fs::path(xiso).parent_path().string();
+        m_ui_state.folder = folder;
+        UI::save_config(xiso, folder);
+        m_ui_state.show_splash = false;
+        if (!folder.empty() && fs::exists(folder)) scan_folder(folder);
+    };
     m_ui_cb.on_select_file  = [this](int i){ m_ui_state.selected=i; load_file(i); };
     m_ui_cb.on_reset_camera = [this](){ m_cam.reset(); m_model_rot_y=0.f; m_renderer.model_rot_y=0.f; };
     m_ui_cb.on_select_anim  = [this](int i){ select_animation(i); m_ui_state.anim_sel=i; };

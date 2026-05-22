@@ -77,21 +77,26 @@ target_include_directories(stb_lib INTERFACE ${stb_SOURCE_DIR})
 
 # ── Sources ───────────────────────────────────────────────
 set(SOURCES
-        src/main.cpp
-        src/App.cpp
-        src/XBXParser.cpp
-        src/Skeleton.cpp
-        src/Animation.cpp
-        src/Renderer.cpp
-        src/Camera.cpp
-        src/Texture.cpp
-        src/UI.cpp
-        src/WorldParser.cpp
+        src/core/main.cpp
+        src/core/App.cpp
+        src/parsers/XBXParser.cpp
+        src/parsers/Skeleton.cpp
+        src/parsers/Animation.cpp
+        src/parsers/WorldParser.cpp
+        src/render/Renderer.cpp
+        src/render/Camera.cpp
+        src/render/Texture.cpp
+        src/ui/UI.cpp
 )
 
 add_executable(XBXViewer ${SOURCES})
 
-target_include_directories(XBXViewer PRIVATE src)
+target_include_directories(XBXViewer PRIVATE
+        src
+        src/core
+        src/render
+        src/ui
+        src/parsers)
 
 target_link_libraries(XBXViewer PRIVATE
         glfw

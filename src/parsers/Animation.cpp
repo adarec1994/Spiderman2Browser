@@ -120,7 +120,7 @@ static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
         v=sar(b,2);if(v&4)v+=-2;else v+=-5;br.read(5);out[0]=v;return 1;
     case 12: v=br.read(4);if(v==0){int r=std::min(4,rem);dec_zeros(out,r);return r;}out[0]=v-8;return 1;
     case 13:
-        b=br.peek(5);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        b=br.peek(5);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-5;return 1;}
         if(low3==2){br.read(4);out[0]=(b&8)?3:-3;return 1;}
         if(low3&1){br.read(5);out[0]=-4-sar(b,3);return 1;}br.read(5);out[0]=sar(b,3)+4;return 1;
     case 14:
@@ -147,7 +147,7 @@ static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
         if(!(b&2)){v=sar(b,2)&7;br.read(5);if(!(v&4))v+=-7;out[0]=v;return 1;}
         {int32_t sh=(sar(b,2)&1)+1;v=sar(b,3);br.read(6);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
     case 20:
-        b=br.peek(7);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        b=br.peek(7);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-5;return 1;}
         if(low3==0){br.read(4);out[0]=(b&8)?3:-3;return 1;}
         if(low3==1){v=sar(b,3)&7;br.read(6);if(!(v&4))v+=-7;out[0]=v;return 1;}
         {int32_t sh=(sar(b,3)&1)+1;v=sar(b,4);br.read(7);if(!(v&4))v+=-7;out[0]=v<<sh;return 1;}
@@ -201,7 +201,7 @@ static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
         if(!(b&2)){br.read(3);v=sar(b,1)&2;out[0]=v-1;return 1;}
         br.read(8);v=sar(b,2);out[0]=(v&0x20)?v-30:v-33;return 1;
     case 51:
-        b=br.peek(8);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-3;return 1;}
+        b=br.peek(8);low3=b&7;if(low3>=3){br.read(3);out[0]=low3-5;return 1;}
         if(low3==2){br.read(4);out[0]=(b&8)?3:-3;return 1;}
         if(low3&1){br.read(8);out[0]=sar(b,3)+4;return 1;}br.read(8);out[0]=-4-sar(b,3);return 1;
     case 52: v=br.read(7);if(v==0){int r=std::min(7,rem);dec_zeros(out,r);return r;}out[0]=v-64;return 1;
@@ -217,9 +217,14 @@ static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
 }
 
 static void decode_channel(BitReader& br, int n, int codec, int32_t* out) {
-    if (codec==0||codec==30||codec==31||codec==60||codec==61||codec==62||codec==63){dec_zeros(out,n);return;}
-    if (codec>=32&&codec<=44){decode_channel(br,n,codec-32,out);return;}
-    int pos=0; while(pos<n) pos+=dec_one(br,n-pos,codec,out+pos);
+    if (codec==0||codec==30||codec==31||codec==62||codec==63){dec_zeros(out,n);return;}
+    if (codec>=32&&codec<=46){decode_channel(br,n,codec-32,out);return;}
+
+    // NAL's funcs_32BF4F table maps 47..61 onto the implementations that
+    // follow the duplicated 32..46 range. The local switch keeps those bodies
+    // as cases 45..59, so translate the table index before dispatching.
+    int impl_codec = (codec>=47&&codec<=61) ? codec-2 : codec;
+    int pos=0; while(pos<n) pos+=dec_one(br,n-pos,impl_codec,out+pos);
 }
 
 static glm::quat qmul(const glm::quat& a, const glm::quat& b) {
