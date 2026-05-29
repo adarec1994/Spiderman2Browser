@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <map>
 #include <unordered_map>
 #include <glm/gtc/matrix_transform.hpp>
@@ -24,6 +25,55 @@ static T rd(const uint8_t* p, size_t off) {
 static std::string read_mat_name(const uint8_t* data, size_t ptr) {
     const char* s = reinterpret_cast<const char*>(data + ptr + 4);
     return std::string(s, strnlen(s, 28));
+}
+
+// A 64-byte block is an affine bind matrix (column-major; world = M*local) when
+// its bottom row is (0,0,0,1) and its rotation columns are non-degenerate.
+static bool xbx_is_affine_mat(const uint8_t* d, size_t sz, size_t o) {
+    if (o + 64 > sz) return false;
+    if (std::fabs(rd<float>(d, o + 12)) > 1e-3f) return false; // m[3][0]
+    if (std::fabs(rd<float>(d, o + 28)) > 1e-3f) return false; // m[3][1]
+    if (std::fabs(rd<float>(d, o + 44)) > 1e-3f) return false; // m[3][2]
+    if (std::fabs(rd<float>(d, o + 60) - 1.0f) > 1e-3f) return false; // m[3][3]
+    for (int c = 0; c < 3; ++c) {
+        float a = rd<float>(d, o + c * 16);
+        float b = rd<float>(d, o + c * 16 + 4);
+        float e = rd<float>(d, o + c * 16 + 8);
+        float m = a * a + b * b + e * e;
+        if (!(m > 0.25f && m < 4.0f)) return false; // rotation column, scale 0.5..2
+    }
+    return true;
+}
+
+// The bind-pose matrix array sits after a variable-size header, so its offset is
+// NOT fixed (was hardcoded 0x2f0 — only correct for 60-bone Black Cat; civilians
+// were read at the wrong offset, giving a scrambled skeleton + wrong inv-bind).
+// Find it by structure: the first run of >=4 affine matrices whose first matrix
+// is the root at the origin (|translation| ~ 0). Spurious later matrix runs
+// (props/attachments/LODs) start at non-origin translations, so this is unambiguous.
+size_t xbx_find_bind_matrix_base(const uint8_t* d, size_t sz, int* out_count) {
+    auto count_run = [&](size_t o) {
+        int n = 0; while (xbx_is_affine_mat(d, sz, o + (size_t)n * 64)) ++n; return n;
+    };
+    size_t best = 0; int best_n = 0;
+    for (size_t o = 0x40; o + 64 <= sz; o += 4) {
+        if (!xbx_is_affine_mat(d, sz, o)) continue;
+        float tx = rd<float>(d, o + 48), ty = rd<float>(d, o + 52), tz = rd<float>(d, o + 56);
+        if (tx * tx + ty * ty + tz * tz > 4e-4f) continue; // first matrix = root at origin
+        int n = count_run(o);
+        if (n >= 4) { best = o; best_n = n; break; }       // first qualifying run wins
+    }
+    // Fallback: first long affine run regardless of origin, else legacy 0x2f0.
+    if (!best) {
+        for (size_t o = 0x40; o + 64 <= sz; o += 4) {
+            if (!xbx_is_affine_mat(d, sz, o)) continue;
+            int n = count_run(o);
+            if (n >= 8) { best = o; best_n = n; break; }
+        }
+    }
+    if (!best) { best = 0x2f0; best_n = 0; }
+    if (out_count) *out_count = best_n;
+    return best;
 }
 
 
@@ -67,7 +117,7 @@ static std::vector<uint32_t> quadlist_to_list(const uint16_t* idx, size_t n, uin
     return tris;
 }
 
-XBXModel* parse_xbx(const std::string& filepath) {
+XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
     auto buf = read_file(filepath);
     if (buf.size() < 16) return nullptr;
     const uint8_t* d = buf.data();
@@ -150,11 +200,32 @@ XBXModel* parse_xbx(const std::string& filepath) {
     }
     if (geom_bases.empty()) return nullptr;
 
+    // Single-model view: a character XBX can carry several GEO containers — the
+    // main body plus auxiliary LOD/extra meshes stored off to the side (e.g.
+    // Spider-Man: a 1668-vert body at the origin + a 495-vert object at x=-1.3).
+    // Drawing them all spawns duplicate "extra models". Keep only the primary
+    // container (most vertices = the body). World/terrain keeps every section.
+    if (primary_geom_only && geom_bases.size() > 1) {
+        uint32_t best_gb = geom_bases[0]; uint32_t best_v = 0;
+        for (uint32_t gb : geom_bases) {
+            uint32_t smc = rd<uint32_t>(d, gb + 0x04);
+            if (smc == 0 || smc > 64) continue;
+            uint32_t vsum = 0;
+            for (uint32_t i = 0; i < smc; ++i) {
+                uint32_t sp = rd<uint32_t>(d, gb + 0x40 + i * 8);
+                if (sp + 0x44 <= sz) vsum += rd<uint32_t>(d, sp + 0x40);
+            }
+            if (vsum > best_v) { best_v = vsum; best_gb = gb; }
+        }
+        geom_bases.assign(1, best_gb);
+    }
+
     auto* model = new XBXModel();
     model->filepath = filepath;
 
-    // ── Bind pose matrices at 0x2f0 (60 × 4×4 float32, row-major) ──
-    constexpr size_t MAT_BASE = 0x2f0;
+    // ── Bind pose matrices (60 × 4×4 float32, col-major). The array offset is
+    //    per-character (variable header), so locate it instead of hardcoding. ──
+    const size_t MAT_BASE = xbx_find_bind_matrix_base(d, sz);
     constexpr int    N_BONES  = 60;
     model->bind_pose.resize(N_BONES, glm::mat4(1.f));
     for (int i = 0; i < N_BONES; ++i) {

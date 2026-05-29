@@ -1383,7 +1383,7 @@ void App::load_file(int idx) {
     m_full_rest_pose.clear();
     m_anim_global_ref_set = false;  // recapture standing-pelvis ref for the new model
 
-    XBXModel* model = parse_xbx(path);
+    XBXModel* model = parse_xbx(path, /*primary_geom_only=*/true);
     if (!model) { m_ui_state.status_msg="Error: Not XBXM or no geometry"; return; }
 
     m_gpu_model = m_renderer.upload_model(model);

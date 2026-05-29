@@ -1,4 +1,5 @@
 #include "Skeleton.h"
+#include "XBXParser.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
@@ -76,6 +77,23 @@ Skeleton* parse_skeleton(const std::string& skel_path, const std::string& xbx_pa
 
         int32_t parent = rd<int32_t>(s, off + 0x28);
 
+        // Stop at the first over-read entry. valid_bone_name alone over-reads:
+        // past the real table sit string/float fragments ("ae_base_bone",
+        // "ernion" from "...quaternion") that look like names but whose parent
+        // field is garbage — string/float bytes reinterpreted as int32, always
+        // huge magnitude (ASCII high byte => >1e9, or a float => ~±1e9). Real
+        // parents are a small bone index (or -1 for a root). Phantom bones inflate
+        // the count, which then mis-sizes the rest pose and the animation quat-track
+        // count (q_tracks = bone_count-1) -> the pose decode shifts and the model
+        // renders mangled. 60-bone rigs escaped this via the 60 clamp; smaller ones
+        // (e.g. 24-deformer civilians) did not. NOTE: some rigs list bones in
+        // grouped (non-hierarchical) order, so a parent may be a LATER index
+        // (forward ref, e.g. the Spidey rig's "l hand" -> parent 58). Do NOT bound
+        // by the current count (that truncated such rigs to ~6 bones); bound by a
+        // generous max plausible bone index so only the billion-valued junk is cut.
+        constexpr int MAX_BONE_INDEX = 256; // real rigs are <=64 bones; junk is ~1e9
+        if (parent < -1 || parent >= MAX_BONE_INDEX) break;
+
         Bone b;
         b.name   = name;
         b.parent = parent;
@@ -87,15 +105,23 @@ Skeleton* parse_skeleton(const std::string& skel_path, const std::string& xbx_pa
     if (bones.empty()) return nullptr;
     size_t nb = bones.size();
 
-    // Bind-pose world positions from XBX: 60 row-major 4x4 float matrices at 0x2f0
-    // Translation = row 3 (indices 12,13,14)
-    constexpr size_t MAT_BASE = 0x2f0;
+    // Bind-pose world positions from the XBX bind matrices (col-major 4x4 float).
+    // The array offset is per-character (variable header) — locate it, do NOT
+    // hardcode 0x2f0 (that offset is only correct for 60-bone Black Cat; civilians
+    // sit at e.g. 0x270/0x2b0, so a fixed read produced a scrambled skeleton).
+    // Matrix i is the bind-WORLD transform of bone i (1:1); translation column
+    // (file offset 48/52/56) is the bone's world position.
+    int mat_count = 0;
+    const size_t MAT_BASE = xbx_find_bind_matrix_base(x, xsz, &mat_count);
     for (size_t i = 0; i < nb; ++i) {
+        // Only the deformer bones have matrices; the trailing fakeroot has none,
+        // so stop at mat_count to avoid reading past the array into garbage.
+        if (mat_count > 0 && (int)i >= mat_count) break;
         size_t moff = MAT_BASE + i * 64;
         if (moff + 64 > xsz) break;
-        float tx = rd<float>(x, moff + 48); // row3.x
-        float ty = rd<float>(x, moff + 52); // row3.y
-        float tz = rd<float>(x, moff + 56); // row3.z
+        float tx = rd<float>(x, moff + 48); // translation.x
+        float ty = rd<float>(x, moff + 52); // translation.y
+        float tz = rd<float>(x, moff + 56); // translation.z
         bones[i].world_pos = {tx, ty, tz};
     }
 
