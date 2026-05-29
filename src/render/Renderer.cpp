@@ -26,7 +26,6 @@ uniform mat4  uBones[60];
 uniform bool  uSkinned;
 
 out vec2 vUV;
-out vec3 vWorldPos;
 
 void main(){
     vec4 pos = vec4(aPos, 1.0);
@@ -42,7 +41,6 @@ void main(){
         }
         if (wsum > 0.001) pos = skinned / wsum;
     }
-    vWorldPos    = vec3(uModel * pos);
     gl_Position  = uMVP * pos;
     gl_PointSize = uPointSize;
     vUV = aUV;
@@ -52,7 +50,6 @@ void main(){
 static const char* FRAG_SRC = R"(
 #version 330 core
 in vec2 vUV;
-in vec3 vWorldPos;
 uniform sampler2D uTex;
 uniform bool uHasTex;
 uniform bool uWire;
@@ -65,31 +62,13 @@ void main(){
     if(uWire)   { fragColor=vec4(uWireCol,1.0); return; }
     if(uShowUV) { fragColor=vec4(fract(vUV.x), fract(vUV.y), 0.2, 1.0); return; }
 
-    // Reconstruct surface normal from position derivatives
-    vec3 dx  = dFdx(vWorldPos);
-    vec3 dy  = dFdy(vWorldPos);
-    vec3 N   = normalize(cross(dx, dy));
-
-    // Simple three-point lighting in world space
-    vec3 L0  = normalize(vec3( 0.6,  1.0,  0.5));  // key
-    vec3 L1  = normalize(vec3(-1.0,  0.3, -0.3));  // fill
-    vec3 L2  = normalize(vec3( 0.0, -1.0,  0.0));  // bounce
-
-    float d0 = max(dot(N, L0), 0.0);
-    float d1 = max(dot(N, L1), 0.0) * 0.4;
-    float d2 = max(dot(N, L2), 0.0) * 0.15;
-    float ambient = 0.35;
-    float light = ambient + d0 * 0.65 + d1 + d2;
-
     vec4 texel = uHasTex ? texture(uTex, vUV) : vec4(0.60, 0.62, 0.65, 1.0);
     float alpha = uTranslucent ? texel.a : 1.0;
     if (uTranslucent && alpha < 0.02) discard;
 
-    vec3 base = texel.rgb;
-    // Gamma expand: GameCube textures were authored for CRT (gamma 2.2).
-    // Without this they appear nearly black on a linear display.
-    base = pow(max(base, vec3(0.0001)), vec3(1.0 / 2.2));
-    fragColor = vec4(base * light, alpha);
+    // Unlit: show the texture as-authored, gamma-expanded for a linear display.
+    vec3 base = pow(max(texel.rgb, vec3(0.0001)), vec3(1.0 / 2.2));
+    fragColor = vec4(base, alpha);
 }
 )";
 

@@ -24,6 +24,12 @@ static App* g_app = nullptr;
 static int vp_x()      { return UI::PANEL_W; }
 static int vp_w(int W) { return std::max(W - UI::PANEL_W, 400); }
 
+static glm::quat safe_quat(glm::quat q) {
+    float m2 = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z;
+    if (!std::isfinite(m2) || m2 <= 1e-12f) return glm::quat(1, 0, 0, 0);
+    return q * (1.0f / std::sqrt(m2));
+}
+
 // ── Skinning ──────────────────────────────────────────────────────────────────
 
 void App::compute_skinning() {
@@ -53,50 +59,167 @@ void App::load_animations(const std::string& folder) {
     std::cout << "Animations: " << m_anim_clips.size() << "\n";
 }
 
-void App::build_anim_bone_map(const AnimClip& clip) {
-    int n_anim = (int)clip.track_count / 3;
-    m_anim_bone_map.resize(n_anim, -1);
+void App::extract_animation(int idx) {
+    if (idx < 0 || idx >= (int)m_anim_clips.size()) return;
 
-    // Black Cat (BC*) animations: tc=72 -> 24 animated bones.
-    // Palette skips: fingers (12-26,33-47), foretwist (27-28,48-49),
-    // headnub (6), head_bone (7). Derived from 60-bone skeleton dump.
-    static const int BC_PALETTE[24] = {
-         0,  // pelvis
-         1,  // spine
-         2,  // spine1
-         3,  // spine2
-         4,  // neck
-         5,  // head
-         8,  // l clavicle
-         9,  // l upperarm
-        10,  // l forearm
-        11,  // l hand
-        29,  // r clavicle
-        30,  // r upperarm
-        31,  // r forearm
-        32,  // r hand
-        50,  // l_breast
-        51,  // r_breast
-        52,  // l thigh
-        53,  // l calf
-        54,  // l foot
-        55,  // l toe0
-        56,  // r thigh
-        57,  // r calf
-        58,  // r foot
-        59,  // r toe0
-    };
+    const AnimClip& clip = m_anim_clips[idx];
+    fs::path src = clip.path;
+    if (src.empty() || !fs::exists(src)) {
+        m_ui_state.status_msg = "Animation source not found";
+        return;
+    }
+
+    fs::path project_root = fs::current_path();
+    std::string cwd_name = project_root.filename().string();
+    if (cwd_name.rfind("cmake-build", 0) == 0 && project_root.has_parent_path())
+        project_root = project_root.parent_path();
+
+    fs::path pack_name = src.parent_path().filename();
+    if (pack_name.empty()) pack_name = "unknown_pack";
+
+    fs::path dst_dir = project_root / "animations" / pack_name;
+    fs::path dst = dst_dir / src.filename();
+
+    std::error_code ec;
+    fs::create_directories(dst_dir, ec);
+    if (ec) {
+        m_ui_state.status_msg = "Could not create animations folder";
+        std::cerr << "[ANIM_EXTRACT] create failed: " << dst_dir << " : " << ec.message() << "\n";
+        return;
+    }
+
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        m_ui_state.status_msg = "Animation extract failed";
+        std::cerr << "[ANIM_EXTRACT] copy failed: " << src << " -> " << dst << " : " << ec.message() << "\n";
+        return;
+    }
+
+    std::ofstream meta(dst_dir / (src.stem().string() + ".txt"));
+    if (meta) {
+        meta << "name=" << clip.name << "\n";
+        meta << "source=" << src.string() << "\n";
+        meta << "duration=" << clip.duration << "\n";
+        meta << "fps=" << clip.fps << "\n";
+        meta << "frames=" << clip.frame_count << "\n";
+        meta << "loop=" << (clip.looping ? 1 : 0) << "\n";
+    }
+
+    m_ui_state.status_msg = "Extracted " + src.filename().string() + " to " + dst_dir.string();
+    std::cout << "[ANIM_EXTRACT] " << src << " -> " << dst << "\n";
+}
+
+void App::extract_all_animations() {
+    int n = (int)m_anim_clips.size();
+    for (int i = 0; i < n; ++i)
+        extract_animation(i);
+    if (n > 0)
+        m_ui_state.status_msg = "Extracted " + std::to_string(n) + " animations";
+}
+
+// Copy a model's .xbx plus its pack's skeleton .dat (magic 0xB5B58C) into
+// extracted_models/<pack>/ so the exact files can be inspected.
+void App::extract_model(int idx) {
+    if (idx < 0 || idx >= (int)m_ui_state.files.size()) return;
+    fs::path src = m_ui_state.files[idx];
+    if (src.empty() || !fs::exists(src)) {
+        m_ui_state.status_msg = "Model source not found";
+        return;
+    }
+
+    fs::path project_root = fs::current_path();
+    std::string cwd_name = project_root.filename().string();
+    if (cwd_name.rfind("cmake-build", 0) == 0 && project_root.has_parent_path())
+        project_root = project_root.parent_path();
+
+    fs::path pack_name = src.parent_path().filename();
+    if (pack_name.empty()) pack_name = "unknown_pack";
+    fs::path dst_dir = project_root / "extracted_models" / pack_name;
+
+    std::error_code ec;
+    fs::create_directories(dst_dir, ec);
+    if (ec) {
+        m_ui_state.status_msg = "Could not create extracted_models folder";
+        std::cerr << "[MODEL_EXTRACT] create failed: " << dst_dir << " : " << ec.message() << "\n";
+        return;
+    }
+
+    fs::copy_file(src, dst_dir / src.filename(), fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        m_ui_state.status_msg = "Model extract failed";
+        std::cerr << "[MODEL_EXTRACT] copy failed: " << src << " : " << ec.message() << "\n";
+        return;
+    }
+
+    // Also copy the skeleton .dat (magic 0xB5B58C) from the same pack.
+    int skel = 0;
+    for (auto& e : fs::directory_iterator(src.parent_path(), ec)) {
+        if (ec) break;
+        if (!e.is_regular_file()) continue;
+        fs::path p = e.path();
+        std::string ext = p.extension().string();
+        for (auto& c : ext) c = (char)tolower((unsigned char)c);
+        if (ext != ".dat") continue;
+        std::ifstream f(p.string(), std::ios::binary);
+        uint32_t magic = 0;
+        if (f.read(reinterpret_cast<char*>(&magic), 4) && magic == 0x00B5B58Cu) {
+            std::error_code ec2;
+            fs::copy_file(p, dst_dir / p.filename(), fs::copy_options::overwrite_existing, ec2);
+            if (!ec2) skel++;
+        }
+    }
+
+    std::ofstream meta(dst_dir / (src.stem().string() + "_source.txt"));
+    if (meta) meta << "source=" << src.string() << "\n";
+
+    m_ui_state.status_msg = "Extracted " + src.filename().string()
+                          + " (+" + std::to_string(skel) + " skel) to " + dst_dir.string();
+    std::cout << "[MODEL_EXTRACT] " << src << " -> " << dst_dir << " (skel x" << skel << ")\n";
+}
+
+void App::build_anim_bone_map(const AnimClip& clip) {
+    int n_anim = clip.n_bones > 0 ? clip.n_bones : (int)clip.track_count / 3;
+    m_anim_bone_map.resize(n_anim, -1);
 
     int n_skel = m_skeleton ? (int)m_skeleton->bones.size() : 0;
     for (int i = 0; i < n_anim; ++i) {
-        if (n_anim == 24 && i < 24) {
-            int si = BC_PALETTE[i];
+        if (i < (int)clip.bone_indices.size()) {
+            int si = clip.bone_indices[i];
             m_anim_bone_map[i] = (si < n_skel) ? si : -1;
         } else {
-            // Fallback for other character types (CIV/COP): direct index
             m_anim_bone_map[i] = (i < n_skel) ? i : -1;
         }
     }
+}
+
+// Capture D_source — the source skeleton's standing-pelvis orientation — once,
+// from an idle clip (its frame 0 is the neutral standing pose). Every clip then
+// anchors its root through the same global rotation, so the orientation is
+// consistent across clips instead of a per-clip frame-0 anchor.
+void App::ensure_global_root_ref() {
+    if (m_anim_global_ref_set) return;
+    m_anim_global_ref_set = true;
+    m_anim_root_ref = glm::quat(1, 0, 0, 0);
+    if (m_full_rest_pose.empty() || m_anim_clips.empty()) return;
+
+    auto upper = [](std::string s){ for (auto& c : s) if (c >= 'a' && c <= 'z') c -= 32; return s; };
+    int idle = -1;
+    for (int i = 0; i < (int)m_anim_clips.size(); ++i)
+        if (upper(m_anim_clips[i].name).find("IDL") != std::string::npos) { idle = i; break; }
+    if (idle < 0) idle = 0; // fallback: first clip (better a shared ref than per-clip)
+
+    AnimClip& ic = m_anim_clips[idle];
+    if (!ic.loaded) parse_animation(ic, m_skel_meta);
+    ic.rest_pose.resize(ic.n_bones);
+    for (int ai = 0; ai < ic.n_bones; ++ai) {
+        int si = (ai < (int)ic.bone_indices.size()) ? ic.bone_indices[ai] : ai;
+        ic.rest_pose[ai] = (si >= 0 && si < (int)m_full_rest_pose.size())
+                         ? m_full_rest_pose[si] : glm::quat(1, 0, 0, 0);
+    }
+    ic.frames_decoded = false;
+    ic.cached_frames.clear();
+    auto p0 = ic.sample_pose(0.f);
+    if (!p0.empty()) m_anim_root_ref = safe_quat(p0[0].q);
 }
 
 void App::select_animation(int idx) {
@@ -112,53 +235,36 @@ void App::select_animation(int idx) {
 
     m_anim_sel  = idx;
     m_anim_time = 0.f;
-    m_anim_play = false;
+    m_anim_play = true;
+    m_ui_state.anim_time = 0.f;
+    m_ui_state.anim_playing = true;
 
     AnimClip& clip = m_anim_clips[idx];
-    if (!clip.loaded) parse_animation(clip);
-    if (!m_anim_rest_pose.empty()) {
-        clip.rest_pose = m_anim_rest_pose;
+    if (!clip.loaded) parse_animation(clip, m_skel_meta);
+    m_ui_state.anim_dur = clip.duration > 0 ? clip.duration
+                        : (clip.fps > 0 && clip.frame_count > 1
+                           ? (float)(clip.frame_count - 1) / clip.fps : 0.f);
+    if (!m_full_rest_pose.empty()) {
+        clip.rest_pose.resize(clip.n_bones);
+        for (int ai = 0; ai < clip.n_bones; ++ai) {
+            int si = (ai < (int)clip.bone_indices.size()) ? clip.bone_indices[ai] : ai;
+            clip.rest_pose[ai] = (si >= 0 && si < (int)m_full_rest_pose.size())
+                               ? m_full_rest_pose[si]
+                               : glm::quat(1,0,0,0);
+        }
         clip.frames_decoded = false;  // force re-decode with rest pose
         clip.cached_frames.clear();
+        clip.cached_root_orientations.clear();
     }
 
     if (m_skeleton) build_anim_bone_map(clip);
 
-    // Debug: print bone mapping and frame-0 values
-    if (m_skeleton && clip.loaded) {
-        auto poses = clip.sample_pose(0.f);
-        int n_anim = (int)poses.size();
-        std::cout << "\n=== Anim '" << clip.name << "' debug ===\n";
-        for (int ai = 0; ai < n_anim; ++ai) {
-            int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : -1;
-            if (si < 0 || si >= (int)m_skeleton->bones.size()) continue;
-
-            const auto& bp = poses[ai];
-            float mag = std::sqrt(bp.q.x*bp.q.x + bp.q.y*bp.q.y + bp.q.z*bp.q.z);
-
-            // Extract rotation from bind pose matrix (3x3 upper-left)
-            glm::mat4 B = m_bind_pose[si];
-            // Bind pose translation = bone world position
-            glm::vec3 bt(B[3][0], B[3][1], B[3][2]);
-
-            std::cout << "  anim[" << ai << "]->skel[" << si << "] "
-                      << m_skeleton->bones[si].name
-                      << "  anim_quat=(" << bp.q.x << "," << bp.q.y << "," << bp.q.z << "," << bp.q.w
-                      << ") |" << mag << "|"
-                      << "  bind_pos=(" << bt.x << "," << bt.y << "," << bt.z << ")"
-                      << "\n";
-
-            // Show bind pose 3x3 rotation
-            if (ai < 4) {
-                std::cout << "    bind_mat row0=(" << B[0][0] << "," << B[1][0] << "," << B[2][0] << ")\n";
-                std::cout << "    bind_mat row1=(" << B[0][1] << "," << B[1][1] << "," << B[2][1] << ")\n";
-                std::cout << "    bind_mat row2=(" << B[0][2] << "," << B[1][2] << "," << B[2][2] << ")\n";
-            }
-        }
-        std::cout << std::endl;
-    }
+    // Anchor the root to the shared standing-pelvis reference (captured once from
+    // an idle), so every clip uses the same global orientation.
+    ensure_global_root_ref();
 
     apply_animation_pose(0.f);
+    m_last_frame = glfwGetTime();
 }
 
 void App::apply_animation_pose(float t) {
@@ -174,47 +280,55 @@ void App::apply_animation_pose(float t) {
     int n_anim = (int)poses.size();
     int n_skel = (int)m_skeleton->bones.size();
 
-    // Extract bind local transforms
+    // Bind-local transforms: rotation default for un-animated bones, and the
+    // per-bone offset (translation) that every bone keeps.
     std::vector<glm::mat4> local_bind(n_skel, glm::mat4(1.0f));
     for (int i = 0; i < n_skel && i < N_BONES; ++i) {
         int par = m_skeleton->bones[i].parent;
-        if (par >= 0 && par < N_BONES)
-            local_bind[i] = glm::inverse(m_bind_pose[par]) * m_bind_pose[i];
-        else
-            local_bind[i] = m_bind_pose[i];
+        local_bind[i] = (par >= 0 && par < N_BONES)
+                      ? glm::inverse(m_bind_pose[par]) * m_bind_pose[i]
+                      : m_bind_pose[i];
     }
 
-    // For each animated bone: local_rot = T[bone] * nal_quat
-    // T = bind_local_q * inverse(rest_q), precomputed in m_nal_to_bind
-    // At rest: T * rest = bind_local (zero error proven)
-    // Animated: T * anim gives coordinate-correct rotation
+    std::vector<BonePose> pose_by_skel(n_skel);
+    std::vector<bool> has_pose(n_skel, false);
+    for (int ai = 0; ai < n_anim; ++ai) {
+        int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : ai;
+        if (si < 0 || si >= n_skel || si >= N_BONES) continue;
+        pose_by_skel[si] = poses[ai];
+        has_pose[si] = true;
+    }
+
     for (int i = 0; i < n_skel && i < N_BONES; ++i) {
         int par = m_skeleton->bones[i].parent;
         glm::vec4 local_t = local_bind[i][3];
-        glm::mat4 local_rot = local_bind[i];
-        local_rot[3] = glm::vec4(0, 0, 0, 1);
+        glm::quat bind_q = safe_quat(glm::quat_cast(glm::mat3(local_bind[i])));
+        glm::quat local_q = bind_q;
 
-        // Check if this bone has animation data
-        for (int ai = 0; ai < n_anim; ++ai) {
-            int si = (ai < (int)m_anim_bone_map.size()) ? m_anim_bone_map[ai] : ai;
-            if (si != i) continue;
-
-            BonePose bp = poses[ai];
-            // Skip identity quaternions
-            float qmag2 = bp.q.x*bp.q.x + bp.q.y*bp.q.y + bp.q.z*bp.q.z;
-            if (qmag2 < 1e-8f && std::abs(bp.q.w - 1.0f) < 0.001f) break;
-
-            // Skip overflow from buggy codecs (valid quaternions have |q| ≈ 1.0)
-            float full_mag2 = qmag2 + bp.q.w*bp.q.w;
-            if (full_mag2 < 0.5f || full_mag2 > 2.0f) break;
-
-            // T * nal_quat = bind-space local rotation
-            glm::quat new_q = glm::normalize(m_nal_to_bind[i] * bp.q);
-            local_rot = glm::mat4_cast(new_q);
-            break;
+        if (has_pose[i]) {
+            BonePose bp = pose_by_skel[i];
+            float q_mag2 = bp.q.x*bp.q.x + bp.q.y*bp.q.y + bp.q.z*bp.q.z + bp.q.w*bp.q.w;
+            if (std::isfinite(q_mag2) && q_mag2 >= 1e-8f) {
+                glm::quat anim_q = safe_quat(bp.q);
+                if (par < 0) {
+                    // Root (pelvis / ae_base_bone): its .dat rest is an identity
+                    // placeholder and the in-game fakeroot/trajectory (disabled in
+                    // the viewer) carries the world facing, so anchor the pelvis to
+                    // the shared standing reference. Keeps the character upright in
+                    // one consistent global frame across all clips, with the pelvis
+                    // still rotating by its real per-frame motion.
+                    local_q = safe_quat((bind_q * glm::inverse(safe_quat(m_anim_root_ref))) * anim_q);
+                } else {
+                    // Non-root: apply the source's own local rotation directly, the
+                    // way the game drives its skeleton. The XBX bind pose is only the
+                    // skinning reference (inv_bind); using it as the motion base
+                    // (T*anim) would rebase every clip off the bind T-pose.
+                    local_q = anim_q;
+                }
+            }
         }
 
-        glm::mat4 local_mat = local_rot;
+        glm::mat4 local_mat = glm::mat4_cast(local_q);
         local_mat[3] = local_t;
 
         if (par >= 0 && par < N_BONES)
@@ -247,10 +361,11 @@ void App::tick_animation(double now) {
                  ? (float)(clip.frame_count - 1) / clip.fps : 1.f);
 
     m_anim_time += (float)dt;
-    if (clip.looping) {
-        if (dur > 0) m_anim_time = std::fmod(m_anim_time, dur);
-    } else {
-        if (m_anim_time >= dur) {
+    if (dur > 0.0f) {
+        if (clip.looping) {
+            m_anim_time = std::fmod(m_anim_time, dur);
+            if (m_anim_time < 0.0f) m_anim_time += dur;
+        } else if (m_anim_time >= dur) {
             m_anim_time = dur;
             m_anim_play = false;
             m_ui_state.anim_playing = false;
@@ -500,8 +615,17 @@ void App::cb_key(GLFWwindow* w, int key, int, int action, int) {
         // Space = play/stop animation
         if (key == GLFW_KEY_SPACE) {
             if (g_app->m_anim_sel >= 0) {
+                if (!g_app->m_anim_play &&
+                    g_app->m_anim_sel < (int)g_app->m_anim_clips.size()) {
+                    const AnimClip& clip = g_app->m_anim_clips[g_app->m_anim_sel];
+                    float dur = clip.duration > 0 ? clip.duration
+                              : (clip.fps > 0 && clip.frame_count > 1
+                                 ? (float)(clip.frame_count - 1) / clip.fps : 1.f);
+                    if (g_app->m_anim_time >= dur) g_app->m_anim_time = 0.f;
+                }
                 g_app->m_anim_play          = !g_app->m_anim_play;
                 g_app->m_ui_state.anim_playing = g_app->m_anim_play;
+                g_app->m_ui_state.anim_time = g_app->m_anim_time;
                 g_app->m_last_frame         = glfwGetTime();
                 if (!g_app->m_anim_play) {
                     // Stop: snap to nearest frame
@@ -663,6 +787,9 @@ void App::setup_callbacks() {
     m_ui_cb.on_select_file  = [this](int i){ m_ui_state.selected=i; load_file(i); };
     m_ui_cb.on_reset_camera = [this](){ m_cam.reset(); m_model_rot_y=0.f; m_renderer.model_rot_y=0.f; };
     m_ui_cb.on_select_anim  = [this](int i){ select_animation(i); m_ui_state.anim_sel=i; };
+    m_ui_cb.on_extract_anim = [this](int i){ extract_animation(i); };
+    m_ui_cb.on_extract_all_anims = [this](){ extract_all_animations(); };
+    m_ui_cb.on_extract_model = [this](int i){ extract_model(i); };
     m_ui_cb.on_prim_override = [this](int smi, int sel) {
         if (!m_gpu_model) return;
         if (smi >= 0 && smi < (int)m_ui_state.submeshes.size())
@@ -692,8 +819,16 @@ void App::setup_callbacks() {
     };
     m_ui_cb.on_play_anim    = [this](){
         if (m_anim_sel<0) return;
+        if (!m_anim_play && m_anim_sel >= 0 && m_anim_sel < (int)m_anim_clips.size()) {
+            const AnimClip& clip = m_anim_clips[m_anim_sel];
+            float dur = clip.duration > 0 ? clip.duration
+                      : (clip.fps > 0 && clip.frame_count > 1
+                         ? (float)(clip.frame_count - 1) / clip.fps : 1.f);
+            if (m_anim_time >= dur) m_anim_time = 0.f;
+        }
         m_anim_play = !m_anim_play;
         m_ui_state.anim_playing = m_anim_play;
+        m_ui_state.anim_time = m_anim_time;
         m_last_frame = glfwGetTime();
     };
     m_ui_cb.on_load_world_file = [this](int i){
@@ -1245,6 +1380,8 @@ void App::load_file(int idx) {
     m_model_rot_y=0.f; m_renderer.model_rot_y=0.f;
     m_anim_sel=-1; m_anim_play=false; m_anim_time=0.f;
     m_ui_state.anim_sel=-1; m_ui_state.anim_playing=false;
+    m_full_rest_pose.clear();
+    m_anim_global_ref_set = false;  // recapture standing-pelvis ref for the new model
 
     XBXModel* model = parse_xbx(path);
     if (!model) { m_ui_state.status_msg="Error: Not XBXM or no geometry"; return; }
@@ -1303,69 +1440,46 @@ void App::load_file(int idx) {
         m_renderer.set_bone_matrices(m_skinning.data(), N_BONES);
     }
 
-    // ── Skeleton ──
-    std::string skel_path = (fs::path(path).parent_path()/"BLACK_CAT.dat").string();
-    if (fs::exists(skel_path)) {
+    // ── Skeleton ── find the skeleton .dat in this model's pack by magic
+    // (0xB5B58C), instead of assuming Black Cat's BLACK_CAT.dat. Animation .dat
+    // files use magic 0x00010101; mesh/data .dat use 0x7BAD*.
+    std::string skel_path;
+    {
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(fs::path(path).parent_path(), ec)) {
+            if (ec) break;
+            if (!e.is_regular_file()) continue;
+            std::string p = e.path().string();
+            std::string ext = e.path().extension().string();
+            for (auto& c : ext) c = (char)tolower((unsigned char)c);
+            if (ext != ".dat") continue;
+            std::ifstream f(p, std::ios::binary);
+            uint32_t magic = 0;
+            if (f.read(reinterpret_cast<char*>(&magic), 4) && magic == 0x00B5B58Cu) {
+                skel_path = p;
+                break;
+            }
+        }
+    }
+    if (!skel_path.empty()) {
         Skeleton* sk = parse_skeleton(skel_path, path);
         if (sk) {
             m_skeleton.reset(sk);
             m_gpu_skel = m_renderer.upload_skeleton(sk);
-            std::cout << "Skeleton: " << sk->bones.size() << " bones\n";
-            for (int i = 0; i < (int)sk->bones.size(); ++i)
-                std::cout << "  bone[" << i << "] par=" << sk->bones[i].parent
-                          << " name=" << sk->bones[i].name << "\n";
+            std::cout << "Skeleton: " << sk->bones.size() << " bones ("
+                      << fs::path(skel_path).filename().string() << ")\n";
         }
     }
 
-    // Load rest pose quaternions from skeleton for animation
-    {
-        auto full_rest = load_skeleton_rest_pose(skel_path);
-        if (!full_rest.empty()) {
-            static const int BC_PAL[24] = {0,1,2,3,4,5,8,9,10,11,29,30,31,32,50,51,52,53,54,55,56,57,58,59};
-            m_anim_rest_pose.resize(24);
-            for (int i = 0; i < 24; i++)
-                m_anim_rest_pose[i] = (BC_PAL[i] < (int)full_rest.size()) ? full_rest[BC_PAL[i]] : glm::quat(1,0,0,0);
-
-            m_full_rest_pose = full_rest;
-
-            // Compute per-bone NAL-to-bind transform: T = bind_local_quat * inverse(rest_quat)
-            // For any NAL quaternion q: bind_local_rotation = T * q
-            for (int i = 0; i < N_BONES; i++) m_nal_to_bind[i] = glm::quat(1,0,0,0);
-            if (m_skeleton) {
-                static const int BC_PAL[24] = {0,1,2,3,4,5,8,9,10,11,29,30,31,32,50,51,52,53,54,55,56,57,58,59};
-                int nb = (int)m_skeleton->bones.size();
-                for (int i = 0; i < nb && i < N_BONES; i++) {
-                    int par = m_skeleton->bones[i].parent;
-                    glm::mat4 local_mat;
-                    if (par >= 0 && par < N_BONES)
-                        local_mat = glm::inverse(m_bind_pose[par]) * m_bind_pose[i];
-                    else
-                        local_mat = m_bind_pose[i];
-
-                    glm::mat3 rot(local_mat);
-                    glm::quat bind_q = glm::normalize(glm::quat_cast(rot));
-                    glm::quat rest_q = (i < (int)full_rest.size()) ? full_rest[i] : glm::quat(1,0,0,0);
-                    m_nal_to_bind[i] = bind_q * glm::inverse(rest_q);
-                }
-                // Debug: verify T * rest = bind_local for BC bones
-                std::cout << "[T_DEBUG] Verifying T * rest == bind_local:\n";
-                for (int ai = 0; ai < 6; ai++) {
-                    int si = BC_PAL[ai];
-                    glm::quat rest_q = full_rest[si];
-                    glm::quat result = m_nal_to_bind[si] * rest_q;
-                    int par = m_skeleton->bones[si].parent;
-                    glm::mat4 lm = (par >= 0) ? glm::inverse(m_bind_pose[par]) * m_bind_pose[si] : m_bind_pose[si];
-                    glm::quat bind_q = glm::normalize(glm::quat_cast(glm::mat3(lm)));
-                    glm::quat diff = result * glm::inverse(bind_q);
-                    float err = std::abs(diff.x) + std::abs(diff.y) + std::abs(diff.z) + std::abs(1.0f - std::abs(diff.w));
-                    std::cout << "  bone[" << si << "] T=(" << m_nal_to_bind[si].x << "," << m_nal_to_bind[si].y
-                              << "," << m_nal_to_bind[si].z << "," << m_nal_to_bind[si].w << ")"
-                              << " err=" << err << "\n";
-                }
-            }
-            std::cout << "[SKEL] Loaded rest pose + NAL-to-bind transforms (" << full_rest.size() << " bones)\n";
-        }
-    }
+    // Per-skeleton animation metadata (bone count, rest-pose quats, per-source
+    // scales) located dynamically in the skeleton .dat, so any character
+    // animates, not just Black Cat.
+    int bone_count = m_skeleton ? std::min((int)m_skeleton->bones.size(), N_BONES) : 0;
+    m_skel_meta = load_skeleton_meta(skel_path, bone_count);
+    m_full_rest_pose = m_skel_meta.rest_pose;
+    if (m_skel_meta.valid)
+        std::cout << "[SKEL_META] " << m_skel_meta.bone_count << " bones, "
+                  << m_skel_meta.quat_scales.size() << " quat scales\n";
 
     delete model;
     m_cam.reset();
@@ -1444,27 +1558,6 @@ void App::run() {
             if (m_fly_look)
                 ImGui::TextColored({1.f,0.8f,0.3f,1.f}, "LOOKING  (release RMB)");
             ImGui::End();
-        }
-
-        // Animation debug panel
-        if (m_anim_sel >= 0) {
-            static float s_anim_scale = 1.0f;
-            static int s_anim_mode = 0;
-            ImGui::SetNextWindowPos({(float)vp_x()+10, (float)m_h - 160}, ImGuiCond_Once);
-            ImGui::SetNextWindowBgAlpha(0.8f);
-            ImGui::Begin("Anim Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-            ImGui::SliderFloat("Scale", &s_anim_scale, 0.01f, 5.0f, "%.3f");
-            const char* modes[] = {"FK additive", "FK absolute", "Direct post", "Direct pre"};
-            ImGui::Combo("Mode", &s_anim_mode, modes, 4);
-            if (ImGui::Button("Reset Scale")) s_anim_scale = 1.0f;
-            ImGui::SameLine();
-            if (ImGui::Button("x0.5")) s_anim_scale *= 0.5f;
-            ImGui::SameLine();
-            if (ImGui::Button("x2")) s_anim_scale *= 2.0f;
-            ImGui::Text("Effective: %.8f", s_anim_scale * 0.5f / 32768.0f);
-            ImGui::End();
-            m_anim_debug_scale = s_anim_scale;
-            m_anim_debug_mode = s_anim_mode;
         }
 
         ImGui::Render();

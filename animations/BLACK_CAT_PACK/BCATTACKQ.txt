@@ -1,0 +1,6 @@
+name=BCATTACKQ
+source=C:\Users\pwd12\OneDrive\Documents\Spider-Man 2.xiso\data\packs\CITY\BLACK_CAT_PACK\BCATTACKQ.dat
+duration=1.3
+fps=30
+frames=40
+loop=0

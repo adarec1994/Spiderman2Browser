@@ -73,14 +73,17 @@ private:
     void select_animation(int idx);
     void tick_animation(double now);
     void apply_animation_pose(float t);
+    void extract_animation(int idx);
+    void extract_all_animations();
+    void extract_model(int idx);   // right-click: copy model .xbx + its skeleton .dat for inspection
 
     std::vector<int> m_anim_bone_map;
+    glm::quat m_anim_root_ref{1, 0, 0, 0}; // shared standing-pelvis ref (D_source) for the global anchor
+    bool      m_anim_global_ref_set = false;
+    void ensure_global_root_ref();         // capture D_source once from an idle clip (clip-independent)
     void build_anim_bone_map(const AnimClip& clip);
-    float m_anim_debug_scale = 1.0f;
-    int   m_anim_debug_mode  = 0;
-    std::vector<glm::quat> m_anim_rest_pose; // 24 rest quats mapped via BC_PALETTE
-    std::vector<glm::quat> m_full_rest_pose; // all 60 rest quats for FK
-    std::array<glm::quat, 60> m_nal_to_bind;  // per-skel-bone: T = bind_local_q * inv(rest_q)
+    SkeletonAnimMeta m_skel_meta;            // per-skeleton bone count / rest pose / scales
+    std::vector<glm::quat> m_full_rest_pose; // skeleton rest quats (fill for un-animated bones)
 
     // Prim-type override
     struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;

@@ -67,6 +67,9 @@ struct UICallbacks {
     std::function<void()>                        on_reset_camera;
     std::function<void(int)>                     on_select_anim;
     std::function<void()>                        on_play_anim;
+    std::function<void(int)>                     on_extract_anim;
+    std::function<void()>                        on_extract_all_anims;
+    std::function<void(int)>                     on_extract_model;
     std::function<void(int,int)>                 on_prim_override;
     std::function<void(int,int)>                 on_tex_override;
     std::function<void(int, const std::string&)> on_tex_assign;

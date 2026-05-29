@@ -1,0 +1,6 @@
+name=BCJMPFLY
+source=C:\Users\pwd12\OneDrive\Documents\Spider-Man 2.xiso\data\packs\CITY\BLACK_CAT_PACK\BCJMPFLY.dat
+duration=1
+fps=30
+frames=30
+loop=1

@@ -266,6 +266,12 @@ void UI::draw(UIState& state, UICallbacks& cb,
                                   + "##f" + std::to_string(idx);
                 if (ImGui::Selectable(lbl.c_str(), idx == state.selected) && idx != state.selected)
                     cb.on_select_file(idx);
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Extract model")) {
+                        if (cb.on_extract_model) cb.on_extract_model(idx);
+                    }
+                    ImGui::EndPopup();
+                }
             }
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -487,8 +493,23 @@ void UI::draw(UIState& state, UICallbacks& cb,
                 state.anim_sel = i;
                 if (cb.on_select_anim) cb.on_select_anim(i);
             }
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Extract to animations")) {
+                    if (cb.on_extract_anim) cb.on_extract_anim(i);
+                }
+                ImGui::EndPopup();
+            }
         }
     aclip.End();
+    if (ImGui::BeginPopupContextWindow("##animlist_ctx",
+                                       ImGuiPopupFlags_MouseButtonRight |
+                                       ImGuiPopupFlags_NoOpenOverItems)) {
+        if (ImGui::MenuItem("Extract all to animations", nullptr, false,
+                            !state.anim_names.empty())) {
+            if (cb.on_extract_all_anims) cb.on_extract_all_anims();
+        }
+        ImGui::EndPopup();
+    }
     ImGui::EndChild();
 
     ImGui::End();

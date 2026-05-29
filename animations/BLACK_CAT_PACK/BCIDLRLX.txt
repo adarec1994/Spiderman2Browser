@@ -1,0 +1,6 @@
+name=BCIDLRLX
+source=C:\Users\pwd12\OneDrive\Documents\Spider-Man 2.xiso\data\packs\CITY\BLACK_CAT_PACK\BCIDLRLX.dat
+duration=1.66667
+fps=30
+frames=50
+loop=1

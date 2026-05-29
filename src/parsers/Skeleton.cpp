@@ -18,6 +18,32 @@ static T rd(const uint8_t* p, size_t off) {
     T v; memcpy(&v, p + off, sizeof(T)); return v;
 }
 
+// A bone-table entry begins with a printable, NUL-terminated name (alpha or '_').
+static bool valid_bone_name(const uint8_t* p, size_t avail) {
+    if (avail < 4) return false;
+    char c0 = (char)p[0];
+    if (!(isalpha((unsigned char)c0) || c0 == '_')) return false;
+    for (size_t i = 0; i < avail && i < 0x1c; ++i) {
+        if (p[i] == 0) return i >= 3;
+        if (p[i] < 32 || p[i] > 126) return false;
+    }
+    return true;
+}
+
+// The bone table sits at a per-character offset (the skeleton .dat is a
+// named-chunk container). Find it: the first place with >=4 consecutive
+// stride-0x30 entries that all start with a valid bone name.
+static size_t find_bone_table(const uint8_t* s, size_t ssz, size_t stride) {
+    for (size_t off = 0x40; off + 4 * stride <= ssz && off < 0x1000; ++off) {
+        int ok = 0;
+        for (int k = 0; k < 4; ++k)
+            if (valid_bone_name(s + off + k * stride, ssz - (off + k * stride))) ok++;
+            else break;
+        if (ok >= 4) return off;
+    }
+    return 0;
+}
+
 Skeleton* parse_skeleton(const std::string& skel_path, const std::string& xbx_path) {
     auto skel = read_file(skel_path);
     auto xbx  = read_file(xbx_path);
@@ -28,13 +54,13 @@ Skeleton* parse_skeleton(const std::string& skel_path, const std::string& xbx_pa
     const size_t   ssz = skel.size();
     const size_t   xsz = xbx.size();
 
-    // Bone table: starts at 0x03ac, stride 0x30
+    // Bone table: per-character offset, stride 0x30.
     // Each entry: name[0x1c], flag[4], idx[4], something[4], parent_signed[4], hash[4]
-    constexpr size_t   BONE_START  = 0x03ac;
     constexpr size_t   BONE_STRIDE = 0x30;
     constexpr size_t   MAX_BONES   = 60;
 
-    if (BONE_START + BONE_STRIDE > ssz) return nullptr;
+    size_t BONE_START = find_bone_table(s, ssz, BONE_STRIDE);
+    if (BONE_START == 0 || BONE_START + BONE_STRIDE > ssz) return nullptr;
 
     std::vector<Bone> bones;
     size_t off = BONE_START;
