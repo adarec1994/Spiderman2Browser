@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(XBXViewer VERSION 1.0 LANGUAGES CXX)
+
+set(APP_TARGET Spiderman2AssetBrowser)
+set(APP_DISPLAY_NAME "Spiderman 2 Asset Browser")
+
+project(${APP_TARGET} VERSION 1.0 DESCRIPTION "${APP_DISPLAY_NAME}" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,6 +83,7 @@ target_include_directories(stb_lib INTERFACE ${stb_SOURCE_DIR})
 set(SOURCES
         src/core/main.cpp
         src/core/App.cpp
+        src/io/Vfs.cpp
         src/parsers/XBXParser.cpp
         src/parsers/Skeleton.cpp
         src/parsers/Animation.cpp
@@ -89,16 +94,19 @@ set(SOURCES
         src/ui/UI.cpp
 )
 
-add_executable(XBXViewer ${SOURCES})
+add_executable(${APP_TARGET} ${SOURCES})
+set_target_properties(${APP_TARGET} PROPERTIES
+        OUTPUT_NAME "${APP_DISPLAY_NAME}")
 
-target_include_directories(XBXViewer PRIVATE
+target_include_directories(${APP_TARGET} PRIVATE
         src
         src/core
+        src/io
         src/render
         src/ui
         src/parsers)
 
-target_link_libraries(XBXViewer PRIVATE
+target_link_libraries(${APP_TARGET} PRIVATE
         glfw
         glad
         glm::glm
@@ -106,15 +114,15 @@ target_link_libraries(XBXViewer PRIVATE
         imguifiledialog_lib
         stb_lib)
 
-# Windows: keep a console window for stdout/stderr logging.
-# Use compiler-agnostic approach so it works with both MSVC and MinGW.
-if(WIN32)
-    if(MSVC)
-        target_link_options(XBXViewer PRIVATE /SUBSYSTEM:CONSOLE)
-    else()
-        # MinGW / GCC: -mconsole sets the PE subsystem to console
-        target_link_options(XBXViewer PRIVATE -mconsole)
-    endif()
+# MSVC: embed debug info in each .obj (/Z7) instead of a shared vc140.pdb.
+# A parallel build (CLion) runs multiple cl.exe that race to write the same PDB,
+# failing intermittently with C1041 "cannot open program database". /Z7 removes
+# the shared PDB entirely (also avoids OneDrive locking a .pdb under the build
+# dir). /FS guards any remaining PDB writer (e.g. third-party deps).
+if(MSVC)
+    target_compile_options(${APP_TARGET} PRIVATE
+            $<$<CONFIG:Debug>:/Z7>
+            /FS)
 endif()
 
-message(STATUS "XBX Viewer configured. Build with: cmake --build build --config Release")
+message(STATUS "${APP_DISPLAY_NAME} configured. Build with: cmake --build build --config Release")

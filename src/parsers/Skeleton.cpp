@@ -1,17 +1,13 @@
 #include "Skeleton.h"
 #include "XBXParser.h"
+#include "Vfs.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return {};
-    size_t sz = f.tellg(); f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), sz);
-    return buf;
+    return vfs::read_file(path);   // serves from a mounted .iso or the real FS
 }
 
 template<typename T>

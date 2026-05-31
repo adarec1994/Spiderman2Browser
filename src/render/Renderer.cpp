@@ -4,7 +4,6 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <filesystem>
-#include <iostream>
 #include <vector>
 #include <cstring>
 #include <utility>
@@ -76,8 +75,6 @@ static unsigned int compile_shader(const char* src, GLenum type) {
     unsigned int s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
     glCompileShader(s);
-    int ok; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) { char log[512]; glGetShaderInfoLog(s,512,nullptr,log); std::cerr<<log<<"\n"; }
     return s;
 }
 

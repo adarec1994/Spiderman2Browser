@@ -1,6 +1,0 @@
-name=BCIDLRLXFID1
-source=C:\Users\pwd12\OneDrive\Documents\Spider-Man 2.xiso\data\packs\CITY\BLACK_CAT_PACK\BCIDLRLXFID1.dat
-duration=5.63333
-fps=30
-frames=170
-loop=0

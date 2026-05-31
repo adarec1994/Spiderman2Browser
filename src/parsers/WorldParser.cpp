@@ -1,20 +1,14 @@
 #include "WorldParser.h"
+#include "Vfs.h"
 #include <fstream>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
-#include <iostream>
-#include <map>
 #include <unordered_set>
 #include <unordered_map>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return {};
-    size_t sz = f.tellg(); f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), sz);
-    return buf;
+    return vfs::read_file(path);   // serves from a mounted .iso or the real FS
 }
 
 template<typename T>
@@ -190,7 +184,6 @@ WorldData* parse_world(const std::string& path) {
         const size_t STRIDE     = 0x34;
         const size_t scan_start = prop_table_off + prop_table_count * 32;
 
-        std::map<int,int> tidx_hist;
         for (size_t off = scan_start; off + STRIDE <= sz; off += 4) {
             if (d[off] != 0x09) continue;
             if (d[off + 1] != 0x00) continue;
@@ -201,21 +194,10 @@ WorldData* parse_world(const std::string& path) {
             if (std::fabs(x) + std::fabs(z) < 10.f) continue;
             uint8_t type_idx = d[off + 18];
             if (type_idx >= (uint8_t)prop_table_count) continue;
-            tidx_hist[(int)type_idx]++;
             wd->props.push_back({ (int)type_idx, (float)yaw_raw, x, y, z });
             off += STRIDE - 4;
         }
-        if (!tidx_hist.empty()) {
-            std::cout << "[PROP_TIDX] type_idx distribution (" << path.substr(path.rfind('/')+1) << "):\n";
-            for (auto& [k,v] : tidx_hist)
-                std::cout << "  idx=" << k << " (" << wd->prop_types[k] << ") x" << v << "\n";
-        }
     }
-
-    std::cout << "[WORLD] " << path << "\n"
-              << "  instances : " << wd->instances.size() << "\n"
-              << "  prop_types: " << wd->prop_types.size() << "\n"
-              << "  props     : " << wd->props.size()     << "\n";
 
     return wd;
 }

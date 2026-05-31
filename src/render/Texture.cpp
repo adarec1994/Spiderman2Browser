@@ -1,6 +1,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include "Texture.h"
+#include "Vfs.h"
 
 #include <glad/glad.h>
 #include <fstream>
@@ -9,7 +10,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <unordered_map>
-#include <iostream>
 #include <cstdint>
 
 namespace fs = std::filesystem;
@@ -30,14 +30,17 @@ struct DDSHeader {
 };
 
 static unsigned int load_dds(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return 0;
+    // Read through the VFS so a mounted .iso is served transparently.
+    std::vector<uint8_t> file = vfs::read_file(path);
+    if (file.size() < 4 + sizeof(DDSHeader)) return 0;
+    const uint8_t* fp = file.data();
+    size_t fpos = 0;
 
-    uint32_t magic; f.read(reinterpret_cast<char*>(&magic), 4);
+    uint32_t magic; std::memcpy(&magic, fp, 4); fpos = 4;
     if (magic != 0x20534444) return 0; // "DDS "
 
     DDSHeader hdr;
-    f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+    std::memcpy(&hdr, fp + fpos, sizeof(hdr)); fpos += sizeof(hdr);
 
     uint32_t w = hdr.width, h = hdr.height;
     uint32_t mips = std::max(1u, hdr.mipMapCount);
@@ -61,7 +64,8 @@ static unsigned int load_dds(const std::string& path) {
         ww=std::max(1u,ww/2); hh=std::max(1u,hh/2);
     }
     std::vector<uint8_t> pixels(data_size);
-    f.read(reinterpret_cast<char*>(pixels.data()), data_size);
+    if (fpos + data_size > file.size()) data_size = file.size() - fpos; // clamp to available
+    std::memcpy(pixels.data(), fp + fpos, data_size);
 
     unsigned int tid;
     glGenTextures(1, &tid);
@@ -114,7 +118,6 @@ unsigned int load_texture(const std::string& path) {
     if (ext == ".dds") tid = load_dds(path);
     if (!tid)          tid = load_stb(path);
 
-    if (!tid) std::cerr << "Texture load failed: " << path << "\n";
     g_cache[path] = tid;
     return tid;
 }
@@ -128,13 +131,11 @@ static std::vector<std::string>                     g_stems_sorted; // for prefi
 void build_tex_registry(const std::string& root_dir) {
     g_registry.clear();
     g_stems_sorted.clear();
-    std::error_code ec;
-    size_t count = 0;
+    // Enumerate once via the VFS so a mounted .iso is served transparently.
+    std::vector<std::string> all = vfs::walk_files(root_dir);
     // ── Pass 1: index all loadable image files ────────────────────────────────
-    for (auto& entry : fs::recursive_directory_iterator(root_dir, ec)) {
-        if (ec) { ec.clear(); continue; }
-        if (!entry.is_regular_file()) continue;
-        std::string fn  = entry.path().filename().string();
+    for (auto& fpath : all) {
+        std::string fn  = fs::path(fpath).filename().string();
         std::string fnl = fn;
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
         // Only index loadable image files — never .dat, .xbx, etc.
@@ -143,14 +144,13 @@ void build_tex_registry(const std::string& root_dir) {
             ext2 != ".png" && ext2 != ".jpg" && ext2 != ".jpeg") continue;
         // store by full lowercase filename
         if (g_registry.find(fnl) == g_registry.end())
-            g_registry[fnl] = entry.path().string();
+            g_registry[fnl] = fpath;
         // also store by stem (no extension) for stemmed lookups
         std::string stem = fs::path(fnl).stem().string();
         if (g_registry.find(stem) == g_registry.end()) {
-            g_registry[stem] = entry.path().string();
+            g_registry[stem] = fpath;
             g_stems_sorted.push_back(stem);
         }
-        ++count;
     }
 
     // ── Pass 2: resolve IFL references (.sg_ files) ──────────────────────────
@@ -158,12 +158,8 @@ void build_tex_registry(const std::string& root_dir) {
     // name to the real texture filename.  e.g. SG_ALLEYWALL_IFL.sg_ contains
     // "sg_blg_alleywall01_res.tga".  We read each .sg_ file, resolve the
     // referenced texture through the registry, and add the IFL stem as an alias.
-    size_t ifl_count = 0;
-    ec.clear();
-    for (auto& entry : fs::recursive_directory_iterator(root_dir, ec)) {
-        if (ec) { ec.clear(); continue; }
-        if (!entry.is_regular_file()) continue;
-        std::string fnl = entry.path().filename().string();
+    for (auto& fpath : all) {
+        std::string fnl = fs::path(fpath).filename().string();
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
         std::string ext2 = fs::path(fnl).extension().string();
         if (ext2 != ".sg_") continue;
@@ -172,12 +168,14 @@ void build_tex_registry(const std::string& root_dir) {
         std::string ifl_stem = fs::path(fnl).stem().string();
         if (g_registry.count(ifl_stem)) continue; // already mapped
 
-        // Read the file (typically < 40 bytes)
-        std::ifstream ifl_f(entry.path().string());
-        if (!ifl_f) continue;
-        std::string line;
-        std::getline(ifl_f, line);
-        // Trim whitespace / newline
+        // Read the file (typically < 40 bytes) through the VFS.
+        std::vector<uint8_t> ifl_data = vfs::read_file(fpath);
+        if (ifl_data.empty()) continue;
+        std::string line(reinterpret_cast<const char*>(ifl_data.data()), ifl_data.size());
+        // Keep only the first line.
+        size_t nl = line.find_first_of("\r\n");
+        if (nl != std::string::npos) line.resize(nl);
+        // Trim trailing whitespace.
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
             line.pop_back();
         if (line.empty()) continue;
@@ -192,7 +190,6 @@ void build_tex_registry(const std::string& root_dir) {
         if (it != g_registry.end()) {
             g_registry[ifl_stem] = it->second;
             g_stems_sorted.push_back(ifl_stem);
-            ++ifl_count;
 
             // Also register the base name (without "_ifl") as an alias.
             // XBX materials reference "s_str_bas1" but the DDS is only reachable
@@ -211,8 +208,6 @@ void build_tex_registry(const std::string& root_dir) {
     }
 
     std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
-    std::cerr << "[TEXREG] indexed " << count << " image files"
-              << " + " << ifl_count << " IFL aliases under " << root_dir << "\n";
 }
 
 static unsigned int registry_lookup(const std::string& hint) {
@@ -328,14 +323,14 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
     };
 
     for (auto& dir : search_dirs) {
-        if (!fs::is_directory(dir)) continue;
+        if (!vfs::is_directory(dir)) continue;
         std::unordered_map<std::string, std::string> lmap;
-        for (auto& entry : fs::directory_iterator(dir)) {
-            if (!entry.is_regular_file()) continue;  // skip directories
-            std::string fn = entry.path().filename().string();
+        for (auto& entry : vfs::list_dir(dir)) {
+            if (entry.is_dir) continue;  // skip directories
+            std::string fn = fs::path(entry.path).filename().string();
             std::string fnl = fn;
             std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
-            lmap[fnl] = entry.path().string();
+            lmap[fnl] = entry.path;
         }
         for (auto& v : variants) {
             std::string vl = v;
@@ -352,15 +347,7 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
 unsigned int find_texture(const std::vector<std::string>& hints, const std::string& model_dir) {
     for (const auto& h : hints) {
         unsigned int tid = find_texture(h, model_dir);
-        if (tid) {
-            std::cerr << "[TEX] found: '" << h << "'\n";
-            return tid;
-        }
-    }
-    if (!hints.empty()) {
-        std::cerr << "[TEX] MISS: tried";
-        for (auto& h : hints) std::cerr << " '" << h << "'";
-        std::cerr << "\n";
+        if (tid) return tid;
     }
     return 0;
 }

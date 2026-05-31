@@ -10,10 +10,12 @@ namespace fs = std::filesystem;
 
 int UI::PANEL_W = 300;
 static constexpr int ANIM_W = 220;
+static constexpr const char* APP_NAME = "Spiderman 2 Asset Browser";
 
-static const char* CFG_PATH = "xbx_viewer.cfg";
+static const char* CFG_PATH = "spiderman_2_asset_browser.cfg";
+static const char* LEGACY_CFG_PATH = "xbx_viewer.cfg";
 
-// ── Config (xbx_viewer.cfg) ──────────────────────────────────────────────────
+// ── Config (spiderman_2_asset_browser.cfg) ───────────────────────────────────
 // New format: lines of "key=value". Backward compatible with the old single
 // folder-path line.
 void UI::save_config(const std::string& xiso_path, const std::string& folder) {
@@ -27,6 +29,10 @@ void UI::load_config(std::string& xiso_path, std::string& folder) {
     xiso_path.clear();
     folder.clear();
     std::ifstream f(CFG_PATH);
+    if (!f) {
+        f.clear();
+        f.open(LEGACY_CFG_PATH);
+    }
     if (!f) return;
     std::string line;
     bool first = true;
@@ -71,76 +77,29 @@ void UI::draw_splash(UIState& state, UICallbacks& cb) {
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
 
-    const float card_w = std::min(560.f, dw * 0.9f);
-    const float card_h = 320.f;
-    ImVec2 origin{(dw - card_w) * 0.5f, (dh - card_h) * 0.5f};
+    // Just the button, centered on the dark background.
+    const float btn_w = std::min(360.f, dw * 0.6f);
+    const float btn_h = 40.f;
+    ImGui::SetCursorPos({(dw - btn_w) * 0.5f, (dh - btn_h) * 0.5f});
 
-    // Card backdrop
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(origin, {origin.x + card_w, origin.y + card_h},
-                      IM_COL32(28, 30, 36, 255), 8.f);
-    dl->AddRect(origin, {origin.x + card_w, origin.y + card_h},
-                IM_COL32(70, 90, 130, 200), 8.f, 0, 1.5f);
-
-    ImGui::SetCursorPos({origin.x + 32.f, origin.y + 24.f});
-    ImGui::BeginGroup();
-
-    // Title — scaled up
-    ImGui::SetWindowFontScale(2.0f);
-    ImGui::TextColored({0.65f, 0.85f, 1.f, 1.f}, "XBX Model Viewer");
-    ImGui::SetWindowFontScale(1.0f);
-
-    ImGui::TextDisabled("Spider-Man 2 / Xbox model and world viewer");
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + card_w - 64.f);
-    ImGui::TextWrapped("Select your game's .xiso file to begin. The viewer scans the parent folder for .xbx models, animations, and world data.");
-    ImGui::PopTextWrapPos();
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    // Primary CTA
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.80f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.55f, 0.90f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.40f, 0.75f, 1.0f));
-    if (ImGui::Button("Locate .xiso file...", {card_w - 64.f, 38.f})) {
+    if (ImGui::Button("Browse to Spiderman2 ISO", {btn_w, btn_h})) {
         IGFD::FileDialogConfig cfg;
         cfg.path  = state.xiso_path.empty()
                       ? (state.folder.empty() ? "." : state.folder)
                       : fs::path(state.xiso_path).parent_path().string();
         cfg.flags = ImGuiFileDialogFlags_Modal;
         ImGuiFileDialog::Instance()->OpenDialog("SPLASH_XISO",
-            "Locate .xiso", ".xiso,.iso,.*", cfg);
+            "Browse to Spiderman2 ISO", ".iso,.xiso,.*", cfg);
     }
     ImGui::PopStyleColor(3);
 
-    ImGui::Spacing();
-
-    if (ImGui::Button("Or pick a folder instead...", {card_w - 64.f, 30.f})) {
-        IGFD::FileDialogConfig cfg;
-        cfg.path  = state.folder.empty() ? "." : state.folder;
-        cfg.flags = ImGuiFileDialogFlags_Modal;
-        ImGuiFileDialog::Instance()->OpenDialog("SPLASH_FOLDER",
-            "Choose Folder", nullptr, cfg);
-    }
-
-    if (!state.xiso_path.empty() || !state.folder.empty()) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::TextDisabled("Previously used:");
-        if (!state.xiso_path.empty())
-            ImGui::TextDisabled("  %s", state.xiso_path.c_str());
-        else
-            ImGui::TextDisabled("  %s", state.folder.c_str());
-    }
-
-    ImGui::EndGroup();
     ImGui::End();
     ImGui::PopStyleColor();
 
-    // ── File dialogs ────────────────────────────────────────────────────────
+    // ── File dialog ─────────────────────────────────────────────────────────
     float fdw = std::min(720.f, dw * 0.8f);
     float fdh = std::min(480.f, dh * 0.75f);
 
@@ -153,19 +112,6 @@ void UI::draw_splash(UIState& state, UICallbacks& cb) {
         }
         ImGuiFileDialog::Instance()->Close();
     }
-
-    ImGui::SetNextWindowPos({(dw - fdw) * 0.5f, (dh - fdh) * 0.5f}, ImGuiCond_Always);
-    if (ImGuiFileDialog::Instance()->Display("SPLASH_FOLDER",
-            ImGuiWindowFlags_NoCollapse, {fdw, fdh}, {fdw, fdh})) {
-        if (ImGuiFileDialog::Instance()->IsOk()) {
-            std::string path = ImGuiFileDialog::Instance()->GetCurrentPath();
-            state.folder = path;
-            save_config(state.xiso_path, path);
-            if (cb.on_scan_folder) cb.on_scan_folder(path);
-            state.show_splash = false;
-        }
-        ImGuiFileDialog::Instance()->Close();
-    }
 }
 
 // ── Main draw ────────────────────────────────────────────────────────────────
@@ -175,6 +121,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
 
     float dh = ImGui::GetIO().DisplaySize.y;
     float dw = ImGui::GetIO().DisplaySize.x;
+    const bool show_anim_panel = state.has_model && !state.anim_names.empty();
 
     // Splash takes over the whole window
     if (state.show_splash) { draw_splash(state, cb); return; }
@@ -191,31 +138,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // ── Header ──────────────────────────────────────────────────────────────
-    ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "XBX Model Viewer");
-    ImGui::Separator();
-
-    // ── Source bar (.xiso / folder + change button) ─────────────────────────
-    std::string src_label;
-    if (!state.xiso_path.empty())
-        src_label = "ISO: " + fs::path(state.xiso_path).filename().string();
-    else if (!state.folder.empty())
-        src_label = "Folder: " + fs::path(state.folder).filename().string();
-    else
-        src_label = "(no source)";
-
-    float chg_w = ImGui::CalcTextSize("Change").x + ImGui::GetStyle().FramePadding.x * 2 + 6;
-    ImGui::TextDisabled("%s", src_label.c_str());
-    if (!state.xiso_path.empty() && ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", state.xiso_path.c_str());
-    else if (!state.folder.empty() && ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", state.folder.c_str());
-
-    // Right-align the "Change" button on the same line
-    float src_line_w = ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x;
-    ImGui::SameLine(src_line_w - chg_w);
-    if (ImGui::SmallButton("Change"))
-        state.show_splash = true;
-
+    ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "%s", APP_NAME);
     ImGui::Separator();
 
     // ── Compute heights for stacked sections ────────────────────────────────
@@ -234,15 +157,6 @@ void UI::draw(UIState& state, UICallbacks& cb,
 
         // ── Models tab ───────────────────────────────────────────────────
         if (ImGui::BeginTabItem("Models")) {
-            ImGui::TextDisabled("%d files", (int)state.files.size());
-            if (!state.status_msg.empty()) {
-                bool err = state.status_msg.rfind("Error", 0) == 0 ||
-                           state.status_msg.rfind("Failed", 0) == 0;
-                ImGui::SameLine();
-                ImGui::TextColored(err ? ImVec4{1,.3f,.3f,1} : ImVec4{.6f,.6f,.6f,1},
-                                   "— %s", state.status_msg.c_str());
-            }
-
             static char search[128] = {};
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##search", "Search...", search, sizeof(search));
@@ -376,61 +290,10 @@ void UI::draw(UIState& state, UICallbacks& cb,
         if (ImGui::Button("Tex Preview"))
             state.show_tex_preview = !state.show_tex_preview;
     }
+
     ImGui::EndChild();
 
     ImGui::End();
-
-    // ── Face type overlay — top-right of viewport ───────────────────────────
-    if (state.has_model && state.sel_submesh >= 0 &&
-        state.sel_submesh < (int)state.submeshes.size()) {
-        auto& sm = state.submeshes[state.sel_submesh];
-        static const char* prim_opts[] = { "TStrip", "TList", "QuadList", "TFan" };
-        const float pad = 8.f;
-        const float w   = 260.f;
-        int n_cands = (int)sm.tex_candidates.size();
-        int extra_lines = 2 + (n_cands > 0 ? n_cands : 1);
-        const float h   = ImGui::GetTextLineHeightWithSpacing() * (4.f + extra_lines) + pad * 2.f;
-        ImGui::SetNextWindowPos({dw - ANIM_W - w - pad, pad});
-        ImGui::SetNextWindowSize({w, h});
-        ImGui::SetNextWindowBgAlpha(0.75f);
-        ImGui::Begin("##facetype_ov", nullptr,
-            ImGuiWindowFlags_NoTitleBar   | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove       | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-        ImGui::TextDisabled("SM%d  prim=%u  %d tris",
-            state.sel_submesh, sm.prim_raw, sm.tri_count);
-        ImGui::TextDisabled("mat: %s", sm.mat_name.c_str());
-
-        ImGui::TextColored({0.6f, 0.9f, 0.6f, 1.f}, "shader: %s",
-            sm.shader_type.empty() ? "(none)" : sm.shader_type.c_str());
-
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(w - pad * 2.f);
-        if (ImGui::Combo("##ftype", &sm.method_sel, prim_opts, 4))
-            if (cb.on_prim_override) cb.on_prim_override(state.sel_submesh, sm.method_sel);
-
-        ImGui::Separator();
-        if (n_cands > 0) {
-            std::vector<const char*> cstrs;
-            for (auto& c : sm.tex_candidates) cstrs.push_back(c.c_str());
-            ImGui::SetNextItemWidth(w - pad * 2.f);
-            if (ImGui::Combo("##texsel", &sm.tex_sel, cstrs.data(), n_cands))
-                if (cb.on_tex_override) cb.on_tex_override(state.sel_submesh, sm.tex_sel);
-            ImGui::TextDisabled("candidates (%d):", n_cands);
-            for (int ci = 0; ci < n_cands; ++ci)
-                ImGui::TextDisabled("  [%d] %s%s", ci, sm.tex_candidates[ci].c_str(),
-                    ci == sm.tex_sel ? " <" : "");
-        } else {
-            ImGui::TextDisabled("no tex candidates");
-        }
-
-        ImGui::Separator();
-        if (ImGui::Button("Material Editor..."))
-            state.mat_editor_open = true;
-
-        ImGui::End();
-    }
 
     if (state.mat_editor_open)
         draw_mat_editor(state, cb);
@@ -449,70 +312,68 @@ void UI::draw(UIState& state, UICallbacks& cb,
     }
 
     // ── Right panel: animation list ─────────────────────────────────────────
-    ImGui::SetNextWindowPos({dw - ANIM_W, 0});
-    ImGui::SetNextWindowSize({(float)ANIM_W, dh});
-    ImGui::Begin("##anim", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    if (show_anim_panel) {
+        ImGui::SetNextWindowPos({dw - ANIM_W, 0});
+        ImGui::SetNextWindowSize({(float)ANIM_W, dh});
+        ImGui::Begin("##anim", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    ImGui::TextColored({1.f, 0.8f, 0.4f, 1.f}, "Animations");
-    ImGui::TextDisabled("%d clips", (int)state.anim_names.size());
-    ImGui::Separator();
-
-    if (state.anim_sel >= 0) {
-        const char* btn_lbl = state.anim_playing ? "Stop##pb" : "Play##pb";
-        if (ImGui::Button(btn_lbl)) {
-            if (cb.on_play_anim) cb.on_play_anim();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reset##tr")) {
-            state.anim_time    = 0.f;
-            state.anim_playing = false;
-            if (cb.on_select_anim) cb.on_select_anim(state.anim_sel);
-        }
-
-        float prog = (state.anim_dur > 0) ? (state.anim_time / state.anim_dur) : 0.f;
-        char overlay[32];
-        snprintf(overlay, sizeof(overlay), "%.2f / %.2fs", state.anim_time, state.anim_dur);
-        ImGui::ProgressBar(prog, {-1, 0}, overlay);
+        ImGui::TextColored({1.f, 0.8f, 0.4f, 1.f}, "Animations");
+        ImGui::TextDisabled("%d clips", (int)state.anim_names.size());
         ImGui::Separator();
-    } else {
-        ImGui::TextDisabled("(none selected)");
-        ImGui::TextDisabled("Space = play/stop");
-        ImGui::Separator();
-    }
 
-    float anim_list_h = dh - ImGui::GetCursorPosY() - ImGui::GetStyle().WindowPadding.y;
-    ImGui::BeginChild("##cliplist", {0, anim_list_h}, ImGuiChildFlags_Borders);
-    ImGuiListClipper aclip;
-    aclip.Begin((int)state.anim_names.size());
-    while (aclip.Step())
-        for (int i = aclip.DisplayStart; i < aclip.DisplayEnd; ++i) {
-            bool sel = (i == state.anim_sel);
-            if (ImGui::Selectable(state.anim_names[i].c_str(), sel)) {
-                state.anim_sel = i;
-                if (cb.on_select_anim) cb.on_select_anim(i);
+        if (state.anim_sel >= 0) {
+            const char* btn_lbl = state.anim_playing ? "Stop##pb" : "Play##pb";
+            if (ImGui::Button(btn_lbl)) {
+                if (cb.on_play_anim) cb.on_play_anim();
             }
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Extract to animations")) {
-                    if (cb.on_extract_anim) cb.on_extract_anim(i);
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##tr")) {
+                state.anim_time    = 0.f;
+                state.anim_playing = false;
+                if (cb.on_select_anim) cb.on_select_anim(state.anim_sel);
+            }
+
+            float prog = (state.anim_dur > 0) ? (state.anim_time / state.anim_dur) : 0.f;
+            char overlay[32];
+            snprintf(overlay, sizeof(overlay), "%.2f / %.2fs", state.anim_time, state.anim_dur);
+            ImGui::ProgressBar(prog, {-1, 0}, overlay);
+            ImGui::Separator();
+        }
+
+        float anim_list_h = dh - ImGui::GetCursorPosY() - ImGui::GetStyle().WindowPadding.y;
+        ImGui::BeginChild("##cliplist", {0, anim_list_h}, ImGuiChildFlags_Borders);
+        ImGuiListClipper aclip;
+        aclip.Begin((int)state.anim_names.size());
+        while (aclip.Step())
+            for (int i = aclip.DisplayStart; i < aclip.DisplayEnd; ++i) {
+                bool sel = (i == state.anim_sel);
+                if (ImGui::Selectable(state.anim_names[i].c_str(), sel)) {
+                    state.anim_sel = i;
+                    if (cb.on_select_anim) cb.on_select_anim(i);
                 }
-                ImGui::EndPopup();
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Extract to animations")) {
+                        if (cb.on_extract_anim) cb.on_extract_anim(i);
+                    }
+                    ImGui::EndPopup();
+                }
             }
+        aclip.End();
+        if (ImGui::BeginPopupContextWindow("##animlist_ctx",
+                                           ImGuiPopupFlags_MouseButtonRight |
+                                           ImGuiPopupFlags_NoOpenOverItems)) {
+            if (ImGui::MenuItem("Extract all to animations", nullptr, false,
+                                !state.anim_names.empty())) {
+                if (cb.on_extract_all_anims) cb.on_extract_all_anims();
+            }
+            ImGui::EndPopup();
         }
-    aclip.End();
-    if (ImGui::BeginPopupContextWindow("##animlist_ctx",
-                                       ImGuiPopupFlags_MouseButtonRight |
-                                       ImGuiPopupFlags_NoOpenOverItems)) {
-        if (ImGui::MenuItem("Extract all to animations", nullptr, false,
-                            !state.anim_names.empty())) {
-            if (cb.on_extract_all_anims) cb.on_extract_all_anims();
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::EndChild();
+        ImGui::EndChild();
 
-    ImGui::End();
+        ImGui::End();
+    }
 }
 // ── Material Editor ───────────────────────────────────────────────────────────
 void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {

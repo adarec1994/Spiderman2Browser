@@ -1,6 +1,0 @@
-name=BCIDL2ZIP
-source=C:\Users\pwd12\OneDrive\Documents\Spider-Man 2.xiso\data\packs\CITY\BLACK_CAT_PACK\BCIDL2ZIP.dat
-duration=1.26667
-fps=30
-frames=39
-loop=0

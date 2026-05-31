@@ -70,8 +70,6 @@ struct UICallbacks {
     std::function<void(int)>                     on_extract_anim;
     std::function<void()>                        on_extract_all_anims;
     std::function<void(int)>                     on_extract_model;
-    std::function<void(int,int)>                 on_prim_override;
-    std::function<void(int,int)>                 on_tex_override;
     std::function<void(int, const std::string&)> on_tex_assign;
     std::function<void(int)>                     on_load_world_file;  // single dat by index
     std::function<void()>                        on_load_all_worlds;  // all world dats
@@ -81,9 +79,9 @@ class UI {
 public:
     static int PANEL_W;
 
-    // Persistent config (xbx_viewer.cfg). Stores xiso path + folder path
-    // as key=value lines. Backward compatible with the old single-line
-    // folder-only format.
+    // Persistent config. Stores xiso path + folder path as key=value lines.
+    // Backward compatible with the old xbx_viewer.cfg single-line folder-only
+    // format.
     static void save_config(const std::string& xiso_path, const std::string& folder);
     static void load_config(std::string& xiso_path, std::string& folder);
 

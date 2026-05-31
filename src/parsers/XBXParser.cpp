@@ -1,20 +1,14 @@
 #include "XBXParser.h"
+#include "Vfs.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
-#include <cstdio>
 #include <cmath>
-#include <map>
 #include <unordered_map>
 #include <glm/gtc/matrix_transform.hpp>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return {};
-    size_t sz = f.tellg(); f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), sz);
-    return buf;
+    return vfs::read_file(path);   // serves from a mounted .iso or the real FS
 }
 
 template<typename T>
@@ -223,12 +217,14 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
     auto* model = new XBXModel();
     model->filepath = filepath;
 
-    // ── Bind pose matrices (60 × 4×4 float32, col-major). The array offset is
-    //    per-character (variable header), so locate it instead of hardcoding. ──
-    const size_t MAT_BASE = xbx_find_bind_matrix_base(d, sz);
+    // ── Bind pose matrices (4×4 float32, col-major). The array offset and count
+    //    are per-character, so locate the run instead of hardcoding 60 matrices.
+    int mat_count = 0;
+    const size_t MAT_BASE = xbx_find_bind_matrix_base(d, sz, &mat_count);
     constexpr int    N_BONES  = 60;
     model->bind_pose.resize(N_BONES, glm::mat4(1.f));
-    for (int i = 0; i < N_BONES; ++i) {
+    int bind_count = mat_count > 0 ? std::min(N_BONES, mat_count) : N_BONES;
+    for (int i = 0; i < bind_count; ++i) {
         size_t base = MAT_BASE + i*64;
         if (base + 64 > sz) break;
         glm::mat4 m;
@@ -448,6 +444,7 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
         sm.tex_name       = tex_name;
         sm.tex_candidates = tex_candidates;
         sm.prim_type      = prim_type;
+        sm.from_pushbuffer = fi_from_p38[si];
 
         sm.positions.resize(vc);
         sm.uvs.resize(vc);
@@ -486,16 +483,14 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
             }
         }
 
-        // ptr+0x28: 5=trilist, 6=tstrip, 8=quadlist.
-        // p38 path: OOB values are DMA batch dividers — filter then decode as trilist.
+        // ptr+0x28 = raw Xbox D3DPRIMITIVETYPE (IDA sub_354560 passes it straight to
+        // DrawIndexedVertices): 5=trilist, 6=tstrip, 7=trifan, 8=quadlist.
+        // p38 path: OOB values are DMA batch dividers; strip decoding skips them
+        // via parity flips and matches the face/body data used by packed meshes.
         if (n_idx >= 3 && fi_starts[si] > 0 && fi_ends[si] <= sz) {
             const uint16_t* raw = reinterpret_cast<const uint16_t*>(d + fi_starts[si]);
             if (fi_from_p38[si]) {
-                std::vector<uint16_t> clean;
-                clean.reserve(n_idx);
-                for (size_t k = 0; k < n_idx; ++k)
-                    if (raw[k] < vc) clean.push_back(raw[k]);
-                sm.indices = trilist_to_list(clean.data(), clean.size(), vc);
+                sm.indices = strip_to_list(raw, n_idx, vc);
             } else if (prim_type == 5) {
                 sm.indices = trilist_to_list(raw, n_idx, vc);
             } else if (prim_type == 8) {

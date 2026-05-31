@@ -73,6 +73,7 @@ struct SkeletonAnimMeta {
     float root_pos_scale = 0.001f;         // scale_table[0]
     float root_q_scale   = 0.001f;         // scale_table[1]
     std::vector<float> quat_scales;        // bone_count-1 nal_quaternion track scales (scale_table[2..])
+    int   quat_track_count = 0;            // count of "nal_quaternion" sources (authoritative; 0=unknown)
 };
 // bone_count comes from parse_skeleton (the bone table); pass it so the rest
 // pose and scale table are read with the right length.

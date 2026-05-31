@@ -85,11 +85,9 @@ private:
     SkeletonAnimMeta m_skel_meta;            // per-skeleton bone count / rest pose / scales
     std::vector<glm::quat> m_full_rest_pose; // skeleton rest quats (fill for un-animated bones)
 
-    // Prim-type override
     struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;
                          std::vector<glm::vec3> positions; };
     std::vector<RawMeshData> m_cached_raw;
-    void rebuild_prim_override(int smi, int sel);
 
     // ── World / area ──────────────────────────────────────────────────────────
     std::unordered_map<std::string, GPUModel*>   m_world_gpu_cache;

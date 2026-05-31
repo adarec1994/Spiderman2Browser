@@ -1,6 +1,7 @@
 #include "App.h"
 #include "Texture.h"
 #include "WorldParser.h"
+#include "Vfs.h"
 #include <glad/glad.h>
 #include <fstream>
 #include <GLFW/glfw3.h>
@@ -12,14 +13,76 @@
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 #include <algorithm>
-#include <iostream>
 #include <fstream>
-#include <map>
 #include <cstring>
 #include <cmath>
+#include <cctype>
 
 namespace fs = std::filesystem;
 static App* g_app = nullptr;
+
+static std::string lower_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
+    return s;
+}
+
+static std::string strip_instance_suffix(std::string stem) {
+    if (stem.size() > 9) {
+        std::string tail = stem.substr(stem.size() - 9);
+        if (tail[0] == '_' && std::all_of(tail.begin() + 1, tail.end(),
+                                          [](unsigned char c){ return std::isdigit(c); }))
+            return stem.substr(0, stem.size() - 9);
+    }
+    return stem;
+}
+
+static bool is_skeleton_dat(const std::string& p) {
+    auto buf = vfs::read_file(p);
+    return buf.size() >= 4 && *reinterpret_cast<const uint32_t*>(buf.data()) == 0x00B5B58Cu;
+}
+
+static std::vector<std::string> ordered_skeleton_candidates(const fs::path& model_path) {
+    std::vector<std::string> exact;
+    std::vector<std::string> fallback;
+    std::string model_stem = lower_copy(model_path.stem().string());
+    std::string model_base = strip_instance_suffix(model_stem);
+
+    for (auto& e : vfs::list_dir(model_path.parent_path().string())) {
+        if (e.is_dir) continue;
+        fs::path p = e.path;
+        if (lower_copy(p.extension().string()) != ".dat") continue;
+        if (!is_skeleton_dat(e.path)) continue;
+
+        std::string skel_stem = lower_copy(p.stem().string());
+        if (skel_stem == model_stem || skel_stem == model_base)
+            exact.push_back(p.string());
+        else
+            fallback.push_back(p.string());
+    }
+
+    std::sort(exact.begin(), exact.end());
+    std::sort(fallback.begin(), fallback.end());
+    exact.insert(exact.end(), fallback.begin(), fallback.end());
+    return exact;
+}
+
+// Resolve a picked source into a scan root, setting up the VFS to match.
+// A real .iso/.xiso FILE is mounted and its own path becomes the (virtual) scan
+// root, so the rest of the app reads straight from the image. A directory
+// (including extracted *.xiso dumps) unmounts and is scanned on the real FS.
+// Returns "" if the path is neither. Either way the folder code path is identical.
+static std::string resolve_source(const std::string& picked) {
+    if (picked.empty()) return "";
+    std::error_code ec;
+    if (fs::is_directory(picked, ec)) { vfs::unmount(); return picked; }
+    if (fs::is_regular_file(picked, ec)) {
+        if (vfs::mount_iso(picked)) return picked;   // mounted: iso path is the root
+        vfs::unmount();
+        return fs::path(picked).parent_path().string();
+    }
+    return "";
+}
 
 static int vp_x()      { return UI::PANEL_W; }
 static int vp_w(int W) { return std::max(W - UI::PANEL_W, 400); }
@@ -56,7 +119,6 @@ void App::load_animations(const std::string& folder) {
     for (auto& c : m_anim_clips)
         m_ui_state.anim_names.push_back(c.name);
 
-    std::cout << "Animations: " << m_anim_clips.size() << "\n";
 }
 
 void App::extract_animation(int idx) {
@@ -84,29 +146,16 @@ void App::extract_animation(int idx) {
     fs::create_directories(dst_dir, ec);
     if (ec) {
         m_ui_state.status_msg = "Could not create animations folder";
-        std::cerr << "[ANIM_EXTRACT] create failed: " << dst_dir << " : " << ec.message() << "\n";
         return;
     }
 
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         m_ui_state.status_msg = "Animation extract failed";
-        std::cerr << "[ANIM_EXTRACT] copy failed: " << src << " -> " << dst << " : " << ec.message() << "\n";
         return;
     }
 
-    std::ofstream meta(dst_dir / (src.stem().string() + ".txt"));
-    if (meta) {
-        meta << "name=" << clip.name << "\n";
-        meta << "source=" << src.string() << "\n";
-        meta << "duration=" << clip.duration << "\n";
-        meta << "fps=" << clip.fps << "\n";
-        meta << "frames=" << clip.frame_count << "\n";
-        meta << "loop=" << (clip.looping ? 1 : 0) << "\n";
-    }
-
     m_ui_state.status_msg = "Extracted " + src.filename().string() + " to " + dst_dir.string();
-    std::cout << "[ANIM_EXTRACT] " << src << " -> " << dst << "\n";
 }
 
 void App::extract_all_animations() {
@@ -117,8 +166,7 @@ void App::extract_all_animations() {
         m_ui_state.status_msg = "Extracted " + std::to_string(n) + " animations";
 }
 
-// Copy a model's .xbx plus its pack's skeleton .dat (magic 0xB5B58C) into
-// extracted_models/<pack>/ so the exact files can be inspected.
+// Copy a model's .xbx plus its matching skeleton .dat into extracted_models/<pack>/.
 void App::extract_model(int idx) {
     if (idx < 0 || idx >= (int)m_ui_state.files.size()) return;
     fs::path src = m_ui_state.files[idx];
@@ -140,41 +188,26 @@ void App::extract_model(int idx) {
     fs::create_directories(dst_dir, ec);
     if (ec) {
         m_ui_state.status_msg = "Could not create extracted_models folder";
-        std::cerr << "[MODEL_EXTRACT] create failed: " << dst_dir << " : " << ec.message() << "\n";
         return;
     }
 
     fs::copy_file(src, dst_dir / src.filename(), fs::copy_options::overwrite_existing, ec);
     if (ec) {
         m_ui_state.status_msg = "Model extract failed";
-        std::cerr << "[MODEL_EXTRACT] copy failed: " << src << " : " << ec.message() << "\n";
         return;
     }
 
-    // Also copy the skeleton .dat (magic 0xB5B58C) from the same pack.
     int skel = 0;
-    for (auto& e : fs::directory_iterator(src.parent_path(), ec)) {
-        if (ec) break;
-        if (!e.is_regular_file()) continue;
-        fs::path p = e.path();
-        std::string ext = p.extension().string();
-        for (auto& c : ext) c = (char)tolower((unsigned char)c);
-        if (ext != ".dat") continue;
-        std::ifstream f(p.string(), std::ios::binary);
-        uint32_t magic = 0;
-        if (f.read(reinterpret_cast<char*>(&magic), 4) && magic == 0x00B5B58Cu) {
-            std::error_code ec2;
-            fs::copy_file(p, dst_dir / p.filename(), fs::copy_options::overwrite_existing, ec2);
-            if (!ec2) skel++;
-        }
+    auto skeletons = ordered_skeleton_candidates(src);
+    if (!skeletons.empty()) {
+        fs::path skel_src = skeletons.front();
+        std::error_code ec2;
+        fs::copy_file(skel_src, dst_dir / skel_src.filename(), fs::copy_options::overwrite_existing, ec2);
+        if (!ec2) skel = 1;
     }
-
-    std::ofstream meta(dst_dir / (src.stem().string() + "_source.txt"));
-    if (meta) meta << "source=" << src.string() << "\n";
 
     m_ui_state.status_msg = "Extracted " + src.filename().string()
                           + " (+" + std::to_string(skel) + " skel) to " + dst_dir.string();
-    std::cout << "[MODEL_EXTRACT] " << src << " -> " << dst_dir << " (skel x" << skel << ")\n";
 }
 
 void App::build_anim_bone_map(const AnimClip& clip) {
@@ -525,8 +558,6 @@ void App::try_select(double mx, double my) {
     int b = pick_bone(mx,my);
     m_sel_bone = b;
     m_renderer.sel_bone = b;
-    if (b>=0 && m_skeleton)
-        std::cout << "Bone " << b << ": " << m_skeleton->bones[b].name << "\n";
 }
 
 // ── Rotation ─────────────────────────────────────────────────────────────────
@@ -736,27 +767,19 @@ bool App::init(int w, int h, const char* title) {
     std::string saved_xiso, saved_folder;
     UI::load_config(saved_xiso, saved_folder);
 
-    if (!saved_xiso.empty() && fs::exists(saved_xiso)) {
-        m_ui_state.xiso_path = saved_xiso;
-        // If the .xiso is itself a directory (extracted dump), use it. Otherwise
-        // use its parent.
-        std::string folder = fs::is_directory(saved_xiso)
-                               ? saved_xiso
-                               : fs::path(saved_xiso).parent_path().string();
-        if (!folder.empty() && fs::exists(folder)) {
-            m_ui_state.folder = folder;
-            scan_folder(folder);
+    // A saved source may be a real .iso file, an extracted folder, or an *.xiso
+    // directory dump. resolve_source() mounts an iso (VFS) or returns the folder;
+    // scan_folder() then behaves identically for both.
+    std::string picked = !saved_xiso.empty() ? saved_xiso : saved_folder;
+    if (!picked.empty() && fs::exists(picked)) {
+        std::string root = resolve_source(picked);
+        if (vfs::mounted()) m_ui_state.xiso_path = picked;
+        if (!root.empty() && vfs::exists(root)) {
+            m_ui_state.folder = root;
+            scan_folder(root);
         } else {
             m_ui_state.show_splash = true;
         }
-    } else if (!saved_folder.empty() && fs::exists(saved_folder)) {
-        // Legacy config: if the path ends in .xiso/.iso, treat it as the iso.
-        std::string ext = fs::path(saved_folder).extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".xiso" || ext == ".iso")
-            m_ui_state.xiso_path = saved_folder;
-        m_ui_state.folder = saved_folder;
-        scan_folder(saved_folder);
     } else {
         m_ui_state.show_splash = true;
     }
@@ -765,6 +788,7 @@ bool App::init(int w, int h, const char* title) {
 
 void App::setup_callbacks() {
     m_ui_cb.on_scan_folder  = [this](const std::string& f){
+        vfs::unmount();                       // a directly-picked folder is real FS
         m_ui_state.folder = f;
         // Folder picked directly (not via .xiso) — clear the iso pointer
         m_ui_state.xiso_path.clear();
@@ -774,15 +798,12 @@ void App::setup_callbacks() {
     };
     m_ui_cb.on_select_xiso  = [this](const std::string& xiso){
         m_ui_state.xiso_path = xiso;
-        // If the .xiso is actually a directory (common for extracted Xbox dumps
-        // named *.xiso), use it directly. Otherwise scan its parent.
-        std::string folder = fs::is_directory(xiso)
-                               ? xiso
-                               : fs::path(xiso).parent_path().string();
-        m_ui_state.folder = folder;
-        UI::save_config(xiso, folder);
+        // Mount a real .iso (VFS), or fall back to folder behaviour for a dir.
+        std::string root = resolve_source(xiso);
+        m_ui_state.folder = root;
+        UI::save_config(xiso, root);
         m_ui_state.show_splash = false;
-        if (!folder.empty() && fs::exists(folder)) scan_folder(folder);
+        if (!root.empty() && vfs::exists(root)) scan_folder(root);
     };
     m_ui_cb.on_select_file  = [this](int i){ m_ui_state.selected=i; load_file(i); };
     m_ui_cb.on_reset_camera = [this](){ m_cam.reset(); m_model_rot_y=0.f; m_renderer.model_rot_y=0.f; };
@@ -790,12 +811,6 @@ void App::setup_callbacks() {
     m_ui_cb.on_extract_anim = [this](int i){ extract_animation(i); };
     m_ui_cb.on_extract_all_anims = [this](){ extract_all_animations(); };
     m_ui_cb.on_extract_model = [this](int i){ extract_model(i); };
-    m_ui_cb.on_prim_override = [this](int smi, int sel) {
-        if (!m_gpu_model) return;
-        if (smi >= 0 && smi < (int)m_ui_state.submeshes.size())
-            m_ui_state.submeshes[smi].prim_method = sel==0?"TStrip":sel==1?"TList":sel==2?"QuadList":"TFan";
-        rebuild_prim_override(smi, sel);
-    };
     m_ui_cb.on_tex_assign = [this](int smi, const std::string& stem) {
         if (!m_gpu_model || smi < 0 || smi >= (int)m_gpu_model->meshes.size()) return;
         std::string dir = fs::path(m_ui_state.files[m_ui_state.selected]).parent_path().string();
@@ -803,19 +818,6 @@ void App::setup_callbacks() {
         m_gpu_model->meshes[smi].tex_id = tid;
         if (smi < (int)m_ui_state.submeshes.size())
             m_ui_state.submeshes[smi].has_tex = tid != 0;
-        std::cerr << "[MATASSIGN] SM" << smi << " -> '" << stem << "' " << (tid?"OK":"MISS") << "\n";
-    };
-    m_ui_cb.on_tex_override = [this](int smi, int sel) {
-        if (!m_gpu_model) return;
-        if (smi < 0 || smi >= (int)m_ui_state.submeshes.size()) return;
-        auto& si = m_ui_state.submeshes[smi];
-        if (sel < 0 || sel >= (int)si.tex_candidates.size()) return;
-        std::string dir = fs::path(m_ui_state.files[m_ui_state.selected]).parent_path().string();
-        unsigned int tid = find_texture(si.tex_candidates[sel], dir);
-        m_gpu_model->meshes[smi].tex_id = tid;
-        si.has_tex = tid != 0;
-        std::cerr << "[TEXOV] SM" << smi << " -> '" << si.tex_candidates[sel]
-                  << "' " << (tid ? "OK" : "MISS") << "\n";
     };
     m_ui_cb.on_play_anim    = [this](){
         if (m_anim_sel<0) return;
@@ -844,13 +846,10 @@ void App::scan_folder(const std::string& folder) {
     m_ui_state.files.clear();
     m_ui_state.selected=-1;
     m_ui_state.folder=folder;
-    std::error_code ec;
-    for (auto& e : fs::recursive_directory_iterator(folder,ec)) {
-        if (ec) break;
-        auto p   = e.path();
-        std::string ext = p.extension().string();
+    for (auto& fp : vfs::walk_files(folder)) {
+        std::string ext = fs::path(fp).extension().string();
         std::transform(ext.begin(),ext.end(),ext.begin(),::tolower);
-        if (ext==".xbx") m_ui_state.files.push_back(p.string());
+        if (ext==".xbx") m_ui_state.files.push_back(fp);
     }
     std::sort(m_ui_state.files.begin(),m_ui_state.files.end());
     m_ui_state.status_msg = std::to_string(m_ui_state.files.size())+" files found";
@@ -859,121 +858,14 @@ void App::scan_folder(const std::string& folder) {
     build_tex_registry(folder);
     get_registry_entries(m_ui_state.all_tex_entries);
 
-    // ── Mat string frequency report ───────────────────────────────────────────
-    {
-        struct SMInfo {
-            std::string file;
-            int         sm;
-            std::string mat_name;   // +0x04
-            std::string shader;     // +0x24
-            std::string tex_name;   // +0x44
-        };
-        // tex_name → list of occurrences (only tex_name needs deduplication count)
-        std::map<std::string, std::vector<SMInfo>> by_tex;
-
-        auto rd32l = [](const uint8_t* d, size_t o) -> uint32_t {
-            uint32_t v; memcpy(&v, d+o, 4); return v;
-        };
-        auto rdstr = [](const uint8_t* d, size_t o, size_t sz, int n=28) -> std::string {
-            if (o+1 > sz) return {};
-            size_t avail = std::min((size_t)n, sz-o);
-            const char* s = reinterpret_cast<const char*>(d+o);
-            size_t len = strnlen(s, avail);
-            // reject binary garbage
-            int printable = 0;
-            for (size_t i=0;i<len;++i) if ((unsigned char)s[i]>=32&&(unsigned char)s[i]<127) ++printable;
-            if (len > 0 && printable < (int)len/2) return {};
-            return std::string(s, len);
-        };
-
-        for (auto& path : m_ui_state.files) {
-            std::ifstream f(path, std::ios::binary | std::ios::ate);
-            if (!f) continue;
-            size_t sz = f.tellg(); f.seekg(0);
-            if (sz < 16) continue;
-            std::vector<uint8_t> buf(sz);
-            f.read(reinterpret_cast<char*>(buf.data()), sz);
-            const uint8_t* d = buf.data();
-            if (memcmp(d, "XBXM", 4) != 0) continue;
-
-            uint32_t chunk_cnt = rd32l(d, 0x08);
-            uint32_t hdr_sz    = rd32l(d, 0x0c);
-            uint32_t geom_base = 0;
-            for (uint32_t ci = 0; ci < chunk_cnt && !geom_base; ++ci) {
-                uint32_t base = hdr_sz + ci*0x30;
-                if (base+48 > sz) break;
-                for (uint32_t i = 0; i < 12; ++i) {
-                    uint32_t v = rd32l(d, base+i*4);
-                    if ((v & 0xFF000000) == 0x02000000 && i+1 < 12) {
-                        geom_base = rd32l(d, base+(i+1)*4)+4; break;
-                    }
-                }
-            }
-            if (!geom_base || geom_base+0x48 > sz) continue;
-            uint32_t sm_cnt = rd32l(d, geom_base+0x04);
-            if (sm_cnt == 0 || sm_cnt > 64) continue;
-
-            std::string shortpath = (fs::path(path).parent_path().filename()
-                                   / fs::path(path).filename()).string();
-
-            for (uint32_t si = 0; si < sm_cnt; ++si) {
-                uint32_t ptr = rd32l(d, geom_base+0x40+si*8);
-                if (ptr+0x60 > sz) continue;
-                uint32_t mat_ptr = rd32l(d, ptr);
-                if (mat_ptr+0x50 > sz) continue;
-
-                std::string mat  = rdstr(d, mat_ptr+0x04, sz);
-                std::string shdr = rdstr(d, mat_ptr+0x24, sz);
-                std::string tex  = rdstr(d, mat_ptr+0x44, sz);
-
-                // key by tex_name (empty tex goes under "")
-                by_tex[tex].push_back({shortpath, (int)si, mat, shdr, tex});
-            }
-        }
-
-        // key by shader (+0x24), sorted by count desc
-        std::map<std::string, std::vector<SMInfo>> by_shader;
-        for (auto& [k,v] : by_tex)
-            for (auto& loc : v)
-                by_shader[loc.shader].push_back(loc);
-
-        std::vector<std::pair<std::string,std::vector<SMInfo>>> multi;
-        for (auto& [k,v] : by_shader) if (v.size() > 1) multi.push_back({k,v});
-        std::sort(multi.begin(), multi.end(),
-            [](auto& a, auto& b){ return a.second.size() > b.second.size(); });
-
-        std::ofstream out("mat_strings_report.txt");
-        if (out) {
-            out << "XBX Mat/Shader/Texture Report\n";
-            out << "Root: " << folder << "\n";
-            out << "Files: " << m_ui_state.files.size() << "\n";
-            out << "Shader types appearing >1 time: " << multi.size() << "\n";
-            out << std::string(72,'=') << "\n\n";
-            for (auto& [shader, locs] : multi) {
-                out << "SHADER: \"" << shader << "\"  x" << locs.size() << "\n";
-                for (auto& loc : locs)
-                    out << "  SM" << loc.sm
-                        << "  mat=\""  << loc.mat_name << "\""
-                        << "  tex=\""  << loc.tex_name << "\""
-                        << "  " << loc.file << "\n";
-                out << "\n";
-            }
-            std::cout << "[SCAN] mat_strings_report.txt written (" << multi.size() << " shader types)\n";
-        }
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
     // Scan for animations in same folder
     load_animations(folder);
 
     // ── World .dat files: bare stem (no _NNNNNNNN suffix) ────────────────────
     m_ui_state.world_files.clear();
     {
-        std::error_code ecw;
-        for (auto& entry : fs::recursive_directory_iterator(folder, ecw)) {
-            if (ecw) { ecw.clear(); continue; }
-            if (!entry.is_regular_file()) continue;
-            auto p = entry.path();
+        for (auto& fp : vfs::walk_files(folder)) {
+            fs::path p = fp;
             std::string ext = p.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext != ".dat") continue;
@@ -996,27 +888,22 @@ void App::scan_folder(const std::string& folder) {
                 while (i < stem.size() && std::isupper((unsigned char)stem[i])) ++i;
                 if (i != stem.size()) continue; // unexpected chars
             }
-            m_ui_state.world_files.push_back(p.string());
+            m_ui_state.world_files.push_back(fp);
         }
         std::sort(m_ui_state.world_files.begin(), m_ui_state.world_files.end());
-        std::cout << "[WORLD_SCAN] " << m_ui_state.world_files.size() << " world dat files\n";
     }
 
     // ── XBX registry: lowercase_stem → absolute_path ─────────────────────────
     m_xbx_registry.clear();
     {
-        std::error_code ecx;
-        for (auto& entry : fs::recursive_directory_iterator(folder, ecx)) {
-            if (ecx) { ecx.clear(); continue; }
-            if (!entry.is_regular_file()) continue;
-            std::string fnl = entry.path().filename().string();
+        for (auto& fp : vfs::walk_files(folder)) {
+            std::string fnl = fs::path(fp).filename().string();
             std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
             if (fs::path(fnl).extension() != ".xbx") continue;
             std::string stem = fs::path(fnl).stem().string();
             if (m_xbx_registry.find(stem) == m_xbx_registry.end())
-                m_xbx_registry[stem] = entry.path().string();
+                m_xbx_registry[stem] = fp;
         }
-        std::cout << "[XBX_REG] " << m_xbx_registry.size() << " XBX files indexed\n";
 
         // Build base index: strip trailing digits/underscore-digits from each stem
         // so lookups like "s_trfflitea" instantly find "s_trfflitea_00000001"
@@ -1041,7 +928,6 @@ void App::scan_folder(const std::string& folder) {
                     m_xbx_base_index[base] = stem;
             }
         }
-        std::cout << "[XBX_REG] base index: " << m_xbx_base_index.size() << " entries\n";
 
         // Build suffix index: for each stem, index every underscore-split suffix
         // so "s_strtlampb_00000001" is findable via "strtlampb"
@@ -1060,23 +946,7 @@ void App::scan_folder(const std::string& folder) {
                 s = s.substr(us + 1);
             }
         }
-        std::cout << "[XBX_REG] suffix index: " << m_xbx_suffix_index.size() << " entries\n";
 
-        // Dump all XBX stems to a text file alongside the exe
-        {
-            std::ofstream out("xbx_mesh_list.txt");
-            if (out) {
-                std::vector<std::string> stems;
-                stems.reserve(m_xbx_registry.size());
-                for (auto& [stem, path] : m_xbx_registry)
-                    stems.push_back(stem);
-                std::sort(stems.begin(), stems.end());
-                for (auto& s : stems)
-                    out << s << "\n";
-                std::cout << "[XBX_REG] wrote xbx_mesh_list.txt ("
-                          << stems.size() << " entries)\n";
-            }
-        }
     }
 }
 
@@ -1122,7 +992,6 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
         if (rit == m_xbx_registry.end()) return nullptr;
         XBXModel* xm = parse_xbx(rit->second);
         if (!xm) {
-            std::cout << "[PARSE_FAIL] " << stem << " @ " << rit->second << "\n";
             return nullptr;
         }
         GPUModel* gm = m_renderer.upload_model(xm);
@@ -1185,7 +1054,6 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
     }
 
     m_world_gpu_cache[key] = nullptr;
-    std::cout << "[WORLD_MISS] " << asset_name << "\n";
     return nullptr;
 }
 
@@ -1225,19 +1093,6 @@ void App::build_world_draws(const WorldData& wd) {
         m_world_draws.push_back({ gm, xf });
     }
 
-    // Debug: show what each name resolved to
-    std::cout << "[BUILD] prop_types->resolved:\n";
-    for (auto& pt : wd.prop_types) {
-        auto it = m_world_gpu_cache.find(lower(pt));
-        bool hit = (it != m_world_gpu_cache.end() && it->second);
-        std::cout << "  " << pt << " -> " << (hit ? lower(pt) : "MISS") << "\n";
-    }
-    std::cout << "[BUILD] instances->resolved:\n";
-    for (auto& inst : wd.instances) {
-        auto it = m_world_gpu_cache.find(lower(inst.asset_name));
-        bool hit = (it != m_world_gpu_cache.end() && it->second);
-        std::cout << "  " << inst.asset_name << " -> " << (hit ? lower(inst.asset_name) : "MISS") << "\n";
-    }
 }
 
 void App::recentre_camera_on_world() {
@@ -1262,9 +1117,6 @@ void App::recentre_camera_on_world() {
     glm::vec3 dir = glm::normalize(centre - start);
     m_cam.yaw   = glm::degrees(atan2f(dir.x, dir.z));
     m_cam.pitch = glm::degrees(asinf(glm::clamp(dir.y, -1.f, 1.f)));
-
-    std::cout << "[CAM] world centre=(" << centre.x << "," << centre.y << "," << centre.z
-              << ") extent=" << extent << " start=(" << start.x << "," << start.y << "," << start.z << ")\n";
 }
 
 // Load the terrain XBX for a sector: same stem as the .dat, same directory.
@@ -1278,12 +1130,8 @@ void App::load_sector_terrain(const std::string& dat_path) {
     // Try stem then stem+"r" (terrain XBX is always named {sector}r)
     GPUModel* gm = world_get_or_load_model(key);
     if (!gm) gm = world_get_or_load_model(key + "r");
-    if (gm) {
+    if (gm)
         m_world_draws.push_back({ gm, glm::mat4(1.f) });
-        std::cout << "[TERRAIN] loaded " << stem << "\n";
-    } else {
-        std::cout << "[TERRAIN_MISS] " << stem << "\n";
-    }
 }
 
 void App::load_world(const std::string& dat_path) {
@@ -1325,7 +1173,6 @@ void App::load_world(const std::string& dat_path) {
     m_ui_state.world_dat_path        = dat_path;
     m_ui_state.world_load_progress   = -1.f;  // hide bar
     m_ui_state.status_msg            = "World loaded";
-    std::cout << "[WORLD] " << m_world_draws.size() << " draw calls\n";
     delete wd;
 }
 
@@ -1361,7 +1208,6 @@ void App::load_all_worlds() {
     m_ui_state.world_dat_path        = "(all)";
     m_ui_state.world_load_progress   = -1.f;
     m_ui_state.status_msg            = "All worlds loaded";
-    std::cout << "[WORLD] all — " << m_world_draws.size() << " draw calls\n";
 }
 
 void App::load_file(int idx) {
@@ -1406,10 +1252,11 @@ void App::load_file(int idx) {
         m_cached_raw[i].vc        = (uint32_t)sm.positions.size();
         m_cached_raw[i].positions = sm.positions;
 
-        // Determine default method_sel from prim_type
-        int default_sel = 0; // TStrip
+        // Determine default method_sel from prim_type (raw Xbox D3DPRIMITIVETYPE)
+        int default_sel = 0; // TStrip (6)
         if (sm.prim_type == 5) default_sel = 1; // TList
         if (sm.prim_type == 8) default_sel = 2; // QuadList
+        if (sm.from_pushbuffer) default_sel = 0; // +0x38 pushbuffer data is strip-like
 
         const char* method_label = "TStrip";
         if (default_sel == 1) method_label = "TList";
@@ -1440,34 +1287,17 @@ void App::load_file(int idx) {
         m_renderer.set_bone_matrices(m_skinning.data(), N_BONES);
     }
 
-    // ── Skeleton ── find the skeleton .dat in this model's pack by magic
-    // (0xB5B58C), instead of assuming Black Cat's BLACK_CAT.dat. Animation .dat
-    // files use magic 0x00010101; mesh/data .dat use 0x7BAD*.
+    // ── Skeleton ── prefer a skeleton .dat whose stem matches the model stem
+    // (e.g. MINION_LIZARD_00000003.xbx -> MINION_LIZARD.dat), then fall back
+    // to any skeleton-looking .dat in the same pack.
     std::string skel_path;
-    {
-        std::error_code ec;
-        for (auto& e : fs::directory_iterator(fs::path(path).parent_path(), ec)) {
-            if (ec) break;
-            if (!e.is_regular_file()) continue;
-            std::string p = e.path().string();
-            std::string ext = e.path().extension().string();
-            for (auto& c : ext) c = (char)tolower((unsigned char)c);
-            if (ext != ".dat") continue;
-            std::ifstream f(p, std::ios::binary);
-            uint32_t magic = 0;
-            if (f.read(reinterpret_cast<char*>(&magic), 4) && magic == 0x00B5B58Cu) {
-                skel_path = p;
-                break;
-            }
-        }
-    }
-    if (!skel_path.empty()) {
-        Skeleton* sk = parse_skeleton(skel_path, path);
+    for (const std::string& candidate : ordered_skeleton_candidates(fs::path(path))) {
+        Skeleton* sk = parse_skeleton(candidate, path);
         if (sk) {
+            skel_path = candidate;
             m_skeleton.reset(sk);
             m_gpu_skel = m_renderer.upload_skeleton(sk);
-            std::cout << "Skeleton: " << sk->bones.size() << " bones ("
-                      << fs::path(skel_path).filename().string() << ")\n";
+            break;
         }
     }
 
@@ -1477,13 +1307,9 @@ void App::load_file(int idx) {
     int bone_count = m_skeleton ? std::min((int)m_skeleton->bones.size(), N_BONES) : 0;
     m_skel_meta = load_skeleton_meta(skel_path, bone_count);
     m_full_rest_pose = m_skel_meta.rest_pose;
-    if (m_skel_meta.valid)
-        std::cout << "[SKEL_META] " << m_skel_meta.bone_count << " bones, "
-                  << m_skel_meta.quat_scales.size() << " quat scales\n";
 
     delete model;
     m_cam.reset();
-    std::cout << "Loaded: " << path << "\n";
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
@@ -1588,95 +1414,4 @@ void App::shutdown() {
     ImGui::DestroyContext();
     glfwDestroyWindow(m_window);
     glfwTerminate();
-}
-// ── Prim-type override ────────────────────────────────────────────────────────
-
-static std::vector<uint32_t> reinterpret_strip(const std::vector<uint16_t>& raw, uint32_t vc) {
-    std::vector<uint32_t> tris;
-    int parity = 0;
-    for (size_t i = 0; i + 2 < raw.size(); ++i) {
-        uint32_t a=raw[i], b=raw[i+1], c=raw[i+2];
-        if (a>=vc||b>=vc||c>=vc){ parity^=1; continue; }
-        if (a==b||b==c||a==c)  { parity^=1; continue; }
-        if (parity){ tris.push_back(a); tris.push_back(c); tris.push_back(b); }
-        else       { tris.push_back(a); tris.push_back(b); tris.push_back(c); }
-        parity ^= 1;
-    }
-    return tris;
-}
-static std::vector<uint32_t> reinterpret_trilist(const std::vector<uint16_t>& raw, uint32_t vc) {
-    std::vector<uint32_t> tris;
-    for (size_t i = 0; i + 2 < raw.size(); i += 3) {
-        uint32_t a=raw[i], b=raw[i+1], c=raw[i+2];
-        if (a>=vc||b>=vc||c>=vc) continue;
-        if (a==b||b==c||a==c)   continue;
-        tris.push_back(a); tris.push_back(b); tris.push_back(c);
-    }
-    return tris;
-}
-static std::vector<uint32_t> reinterpret_quadlist(const std::vector<uint16_t>& raw, uint32_t vc) {
-    std::vector<uint32_t> tris;
-    for (size_t i = 0; i + 3 < raw.size(); i += 4) {
-        uint32_t a=raw[i], b=raw[i+1], c=raw[i+2], d_=raw[i+3];
-        if (a>=vc||b>=vc||c>=vc||d_>=vc) continue;
-        tris.push_back(a); tris.push_back(b); tris.push_back(c);
-        tris.push_back(a); tris.push_back(c); tris.push_back(d_);
-    }
-    return tris;
-}
-static std::vector<uint32_t> reinterpret_trifan(const std::vector<uint16_t>& raw, uint32_t vc) {
-    std::vector<uint32_t> tris;
-    if (raw.size() < 3) return tris;
-    uint32_t root = raw[0];
-    if (root >= vc) return tris;
-    for (size_t i = 1; i + 1 < raw.size(); ++i) {
-        uint32_t b=raw[i], c=raw[i+1];
-        if (b>=vc||c>=vc||root==b||b==c||root==c) continue;
-        tris.push_back(root); tris.push_back(b); tris.push_back(c);
-    }
-    return tris;
-}
-
-void App::rebuild_prim_override(int smi, int sel) {
-    if (!m_gpu_model) return;
-    if (smi < 0 || smi >= (int)m_cached_raw.size()) return;
-    auto& rd = m_cached_raw[smi];
-
-    if (rd.raw.empty()) {
-        // No raw index buffer — generate from sequential vertex order
-        std::vector<uint32_t> tris;
-        if (sel == 2) { // QuadList
-            for (uint32_t i = 0; i + 3 < rd.vc; i += 4) {
-                tris.push_back(i); tris.push_back(i+1); tris.push_back(i+2);
-                tris.push_back(i); tris.push_back(i+2); tris.push_back(i+3);
-            }
-        } else if (sel == 3) { // TFan
-            for (uint32_t i = 1; i + 1 < rd.vc; ++i) {
-                tris.push_back(0); tris.push_back(i); tris.push_back(i+1);
-            }
-        } else if (sel == 1) { // TList — sequential groups of 3
-            for (uint32_t i = 0; i + 2 < rd.vc; i += 3) {
-                tris.push_back(i); tris.push_back(i+1); tris.push_back(i+2);
-            }
-        } else { // TStrip
-            int parity = 0;
-            for (uint32_t i = 0; i + 2 < rd.vc; ++i) {
-                if (parity){ tris.push_back(i); tris.push_back(i+2); tris.push_back(i+1); }
-                else       { tris.push_back(i); tris.push_back(i+1); tris.push_back(i+2); }
-                parity ^= 1;
-            }
-        }
-        m_gpu_model->update_mesh_indices(smi, tris);
-        return;
-    }
-
-    std::vector<uint32_t> tris;
-    switch (sel) {
-        case 0: tris = reinterpret_strip   (rd.raw, rd.vc); break;
-        case 1: tris = reinterpret_trilist  (rd.raw, rd.vc); break;
-        case 2: tris = reinterpret_quadlist (rd.raw, rd.vc); break;
-        case 3: tris = reinterpret_trifan   (rd.raw, rd.vc); break;
-        default: return;
-    }
-    m_gpu_model->update_mesh_indices(smi, tris);
 }

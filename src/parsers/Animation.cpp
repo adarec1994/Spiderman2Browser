@@ -1,23 +1,33 @@
 #include "Animation.h"
+#include "Vfs.h"
 #include <fstream>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
-#include <iostream>
 #include <filesystem>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return {};
-    size_t sz = f.tellg(); f.seekg(0);
-    std::vector<uint8_t> buf(sz);
-    f.read(reinterpret_cast<char*>(buf.data()), sz);
-    return buf;
+    return vfs::read_file(path);   // serves from a mounted .iso or the real FS
 }
 
 template<typename T>
 static T rd(const uint8_t* p, size_t off) {
     T v; memcpy(&v, p + off, sizeof(T)); return v;
+}
+
+// Count non-overlapping occurrences of an ASCII needle in a byte blob.
+// Used to read the skeleton's animation source-descriptor list, which names
+// exactly one "nal_quaternion" per animated rotation track — the authoritative
+// quaternion-track count (bone_count-1 over-counts by the trailing fakeroot).
+static int count_substr(const uint8_t* d, size_t sz, const char* needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0 || sz < nlen) return 0;
+    int n = 0;
+    for (size_t i = 0; i + nlen <= sz; ) {
+        if (memcmp(d + i, needle, nlen) == 0) { ++n; i += nlen; }
+        else ++i;
+    }
+    return n;
 }
 
 // Black Cat pose sources are laid out like the game skeleton source table:
@@ -143,6 +153,13 @@ SkeletonAnimMeta load_skeleton_meta(const std::string& skel_path, int bone_count
         for (int i = 0; i < bone_count - 1; ++i)
             meta.quat_scales[i] = rd<float>(d, so + (size_t)(2 + i) * 4);
     }
+
+    // Authoritative quaternion-track count: one "nal_quaternion" source per
+    // animated rotation track in the skeleton's source-descriptor list. This is
+    // the real count; bone_count-1 over-counts by the trailing fakeroot (e.g.
+    // MINION_LIZARD: 44 nal_quaternion vs bone_count-1 = 45), making the decoder
+    // read one packet too many and desync the stream tail. 0 = not found.
+    meta.quat_track_count = count_substr(d, sz, "nal_quaternion");
 
     meta.valid = (rq != 0);
     return meta;
@@ -832,8 +849,17 @@ void parse_animation(AnimClip& clip, const SkeletonAnimMeta& meta) {
             read_packet(sec.root_pos_packets[axis]);
         read_packet(sec.root_quat_packet);
 
-        int q_track_count = (meta.valid && meta.bone_count > 1)
-                          ? meta.bone_count - 1 : BC_QUAT_TRACK_COUNT;
+        // Quaternion-track count: the skeleton's source-descriptor list names
+        // exactly one "nal_quaternion" per animated rotation track, so that count
+        // is authoritative. The old bone_count-1 over-counts by the trailing
+        // fakeroot (e.g. MINION_LIZARD: 44 sources vs bone_count-1 = 45), which
+        // read one packet too many and desynced the stream tail. Fall back to
+        // bone_count-1 / BC default only when the source list isn't found.
+        // (Black Cat is 59 either way, so working rigs are unaffected.)
+        int q_track_count = (meta.quat_track_count > 0)
+                          ? meta.quat_track_count
+                          : ((meta.valid && meta.bone_count > 1)
+                             ? meta.bone_count - 1 : BC_QUAT_TRACK_COUNT);
         for (int qi = 0; qi < q_track_count && cur < sec_end && cur < sz; ++qi) {
             std::vector<uint8_t> packet;
             if (!read_packet(packet)) break;
@@ -891,43 +917,18 @@ void parse_animation(AnimClip& clip, const SkeletonAnimMeta& meta) {
     }
 
     clip.loaded = true;
-    int max_active = 0;
-    for (auto& s : clip.sections) max_active = std::max(max_active, s.n_active);
-    int max_signal = 0;
-    int max_pos_skip = 0;
-    int max_extra = 0;
-    for (auto& s : clip.sections) {
-        max_signal = std::max(max_signal, (int)s.signal_packets.size());
-        max_pos_skip = std::max(max_pos_skip, s.skipped_position_tracks);
-        max_extra = std::max(max_extra, s.skipped_extra_packets);
-    }
-    std::cout << "[ANIM] '" << clip.name << "': "
-              << clip.frame_count << "F " << sec_count << "sec "
-              << max_active << " active streams "
-              << "rootpos+rootq+59q+floor+traj";
-    if (max_signal || max_pos_skip || max_extra) {
-        std::cout << "+" << max_signal << "sig";
-        if (max_pos_skip) std::cout << "+" << max_pos_skip << "pos(skip)";
-        if (max_extra) std::cout << "+" << max_extra << "extra";
-        std::cout << " ";
-    } else {
-        std::cout << " ";
-    }
-    std::cout
-              << "qs=" << clip.qscale << " "
-              << (clip.looping ? "loop" : "once") << "\n";
 }
 
 std::vector<AnimClip> scan_animations(const std::string& folder) {
     std::vector<AnimClip> clips;
     namespace fs = std::filesystem;
-    if (!fs::is_directory(folder)) return clips;
+    if (!vfs::is_directory(folder)) return clips;
 
-    for (auto& entry : fs::directory_iterator(folder)) {
-        if (!entry.is_regular_file()) continue;
-        std::string path = entry.path().string();
-        std::string stem = entry.path().stem().string();
-        std::string ext  = entry.path().extension().string();
+    for (auto& entry : vfs::list_dir(folder)) {
+        if (entry.is_dir) continue;
+        std::string path = entry.path;
+        std::string stem = fs::path(path).stem().string();
+        std::string ext  = fs::path(path).extension().string();
         for (auto& c : ext) c = tolower(c);
         if (ext != ".dat") continue;
         if (stem.empty()) continue;
@@ -935,18 +936,17 @@ std::vector<AnimClip> scan_animations(const std::string& folder) {
         // Any .dat with the NAL animation magic is a clip, regardless of name.
         // Skeleton .dat use magic 0x00B5B58C and mesh/data .dat use 0x7BAD*, so
         // the magic check alone separates animations from everything else.
-        std::ifstream f(path, std::ios::binary);
-        if (!f) continue;
-        uint32_t ver = 0;
-        f.read(reinterpret_cast<char*>(&ver), 4);
-        if (ver != 0x00010101) continue;
+        // Read the header through the VFS (serves from a mounted .iso or real FS).
+        std::vector<uint8_t> hdr = vfs::read_file(path);
+        if (hdr.size() < 0xB8) continue;
+        if (rd<uint32_t>(hdr.data(), 0) != 0x00010101) continue;
 
         AnimClip clip;
         clip.name = stem; clip.path = path;
-        f.seekg(0xA4); uint32_t lf=0; f.read((char*)&lf,4); clip.looping=lf!=0;
-        f.seekg(0xA8); float dur=0; f.read((char*)&dur,4); clip.duration=dur;
-        f.seekg(0xB0); float fp=0;  f.read((char*)&fp,4);  clip.fps=fp;
-        f.seekg(0xB4); uint32_t fc=0; f.read((char*)&fc,4); clip.frame_count=fc;
+        clip.looping     = rd<uint32_t>(hdr.data(), 0xA4) != 0;
+        clip.duration    = rd<float>(hdr.data(), 0xA8);
+        clip.fps         = rd<float>(hdr.data(), 0xB0);
+        clip.frame_count = rd<uint32_t>(hdr.data(), 0xB4);
         clip.n_bones=0; clip.track_count=0;
         clips.push_back(std::move(clip));
     }
