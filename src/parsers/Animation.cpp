@@ -488,6 +488,24 @@ static std::vector<glm::quat> decode_entropy_quat_packet(const std::vector<uint8
     glm::quat cur = st.q;
     out[0] = packed_output ? unpack_packed_quat3(cur) : cur;
 
+    // Seed-only / constant track. Packets too short to carry per-frame entropy
+    // delta channels (the 4-byte tracks — e.g. ARMORED_THUG hit-reaction
+    // r-forearm/hand/finger, bytes "00 00 20 04") are constant: the bone holds
+    // one local orientation for the whole clip. Verified via IDA
+    // (NAL_WritePackedQuaternionTrack_DeltaAccum @0x332f70): the warm-up flags at
+    // state+0x15 make the writer emit the SEED before entropy-delta accumulation
+    // begins, and a seed-only source never reaches the accumulate loop. Running
+    // the second-order integrator below on such a packet re-applies the seed
+    // velocity every frame and spins the bone away (model collapse); skipping the
+    // packet drops the seed and freezes the bone at rest (arms in wrong pose).
+    // Correct behavior: hold the decoded seed for all frames. Threshold <5 so it
+    // touches ONLY the 4-byte constants — every working track (>=6 bytes,
+    // including the 6-byte rest-seed clavicles) decodes exactly as before.
+    if ((int)packet.size() < 5) {
+        for (int f = 1; f < frame_count; ++f) out[f] = out[0];
+        return out;
+    }
+
     float abs_scale = std::abs(scale);
     auto apply_accum_delta = [&]() {
         glm::quat delta = quat_from_scaled_vec((float)st.accum[0] * abs_scale,
@@ -646,6 +664,13 @@ void AnimClip::decode_all_frames() const {
         for (int qi = 0; qi < nq; qi++) {
             int bone = sec.quat_bones[qi];
             if (bone < 0 || bone >= n_bones) continue;
+            // Skip ONLY truly-empty (0-byte) tracks: those carry no data, so
+            // decoding them yields identity and would OVERWRITE the bone's rest
+            // pose with identity (this is what exploded the legs). Non-empty short
+            // packets are seed-only constants and are handled inside
+            // decode_entropy_quat_packet (it holds the seed instead of
+            // integrating) — see the note there. Verified via IDA.
+            if (nf >= 2 && sec.quat_packets[qi].empty()) continue;
             float track_scale = (qi < (int)sec.quat_scales.size()) ? sec.quat_scales[qi] : 0.001f;
             // packed_output=false: decode at full float precision. The game packs
             // these to 3 signed bytes (~1/127 ~= 0.8deg steps) for storage, but for

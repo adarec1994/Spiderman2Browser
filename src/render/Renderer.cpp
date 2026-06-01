@@ -7,6 +7,7 @@
 #include <vector>
 #include <cstring>
 #include <utility>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -17,12 +18,15 @@ layout(location=0) in vec3  aPos;
 layout(location=1) in vec2  aUV;
 layout(location=2) in vec4  aBoneIdx;
 layout(location=3) in vec4  aBoneWt;
+layout(location=4) in mat4  aInstModel;   // per-instance world matrix (loc 4,5,6,7)
 
 uniform mat4  uMVP;
 uniform mat4  uModel;
 uniform float uPointSize;
 uniform mat4  uBones[60];
 uniform bool  uSkinned;
+uniform bool  uInstanced;   // world instancing: use aInstModel + uVP
+uniform mat4  uVP;          // view*proj (instanced path; vertices are in local space)
 
 out vec2 vUV;
 
@@ -40,7 +44,7 @@ void main(){
         }
         if (wsum > 0.001) pos = skinned / wsum;
     }
-    gl_Position  = uMVP * pos;
+    gl_Position  = uInstanced ? (uVP * aInstModel * pos) : (uMVP * pos);
     gl_PointSize = uPointSize;
     vUV = aUV;
 }
@@ -285,6 +289,7 @@ void Renderer::draw_scene(const Camera& cam, int vp_x, int vp_w, int vp_h,
     glm::mat4 M   = S * Ry * T;
 
     glUseProgram(m_shader);
+    glUniform1i(uloc("uInstanced"), 0);
     glUniformMatrix4fv(uloc("uMVP"),  1, GL_FALSE, glm::value_ptr(MVP));
     glUniformMatrix4fv(uloc("uModel"),1, GL_FALSE, glm::value_ptr(M));
     glUniform1i(uloc("uTex"),0);
@@ -425,6 +430,7 @@ void Renderer::draw_world_instances(const Camera& cam, int vp_x, int vp_w, int v
     glUniform1i(uloc("uWire"),    0);
     glUniform1i(uloc("uShowUV"),  0);
     glUniform1i(uloc("uSkinned"), 0);
+    glUniform1i(uloc("uInstanced"), 0);
     glUniform1f(uloc("uPointSize"), 1.f);
 
     // Identity bones uploaded once
@@ -480,6 +486,130 @@ void Renderer::draw_world_instances(const Camera& cam, int vp_x, int vp_w, int v
         glBindVertexArray(m_grid_vao);
         glDrawArrays(GL_LINES, 0, m_grid_n);
         glBindVertexArray(0);
+    }
+
+    glUseProgram(0);
+    glDisable(GL_SCISSOR_TEST);
+}
+
+// ── Instanced world ───────────────────────────────────────
+void InstancedModel::release() {
+    if (inst_vbo) glDeleteBuffers(1, &inst_vbo);
+    inst_vbo = 0;
+    xforms.clear();
+    model = nullptr;   // not owned here
+}
+void InstancedWorld::release() {
+    for (auto& im : models) im.release();
+    models.clear();
+    total_instances = total_draws = 0;
+}
+
+// Attach the per-instance mat4 stream (locations 4..7) to a model's submesh VAOs.
+// A mat4 vertex attribute occupies 4 consecutive vec4 slots, each advancing once
+// per instance (glVertexAttribDivisor = 1).
+static void attach_instance_buffer(GPUModel* model, unsigned int inst_vbo) {
+    for (auto& mesh : model->meshes) {
+        glBindVertexArray(mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, inst_vbo);
+        for (int c = 0; c < 4; ++c) {
+            glEnableVertexAttribArray(4 + c);
+            glVertexAttribPointer(4 + c, 4, GL_FLOAT, GL_FALSE,
+                                  (GLsizei)sizeof(glm::mat4),
+                                  (void*)(uintptr_t)(c * sizeof(glm::vec4)));
+            glVertexAttribDivisor(4 + c, 1);   // advance once per instance
+        }
+        glBindVertexArray(0);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+InstancedWorld Renderer::build_instanced_world(
+        const std::vector<std::pair<GPUModel*, glm::mat4>>& instances) {
+    InstancedWorld iw;
+
+    // Group placements by unique GPUModel pointer (the same model is shared across
+    // all its placements via m_world_gpu_cache).
+    std::unordered_map<GPUModel*, size_t> index_of;   // model -> slot in iw.models
+    for (auto& [model, xform] : instances) {
+        if (!model) continue;
+        auto it = index_of.find(model);
+        if (it == index_of.end()) {
+            index_of[model] = iw.models.size();
+            InstancedModel im; im.model = model;
+            im.xforms.push_back(xform);
+            iw.models.push_back(std::move(im));
+        } else {
+            iw.models[it->second].xforms.push_back(xform);
+        }
+    }
+
+    // Upload each model's per-instance transform buffer and wire it to its VAOs.
+    for (auto& im : iw.models) {
+        if (!im.model || im.xforms.empty()) continue;
+        glGenBuffers(1, &im.inst_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, im.inst_vbo);
+        glBufferData(GL_ARRAY_BUFFER, im.xforms.size() * sizeof(glm::mat4),
+                     im.xforms.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        attach_instance_buffer(im.model, im.inst_vbo);
+        iw.total_instances += (long long)im.xforms.size();
+        iw.total_draws     += (long long)im.model->meshes.size();   // one instanced draw per submesh
+    }
+
+    return iw;
+}
+
+void Renderer::draw_instanced_world(const Camera& cam, int vp_x, int vp_w, int vp_h,
+                                    const InstancedWorld& iw) {
+    glViewport(vp_x, 0, vp_w, vp_h);
+    glScissor (vp_x, 0, vp_w, vp_h);
+    glEnable(GL_SCISSOR_TEST);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    float aspect = (float)vp_w / (float)std::max(vp_h, 1);
+    glm::mat4 VP = cam.proj(aspect) * cam.view();
+
+    glUseProgram(m_shader);
+    glUniform1i(uloc("uTex"),     0);
+    glUniform1i(uloc("uWire"),    0);
+    glUniform1i(uloc("uShowUV"),  0);
+    glUniform1i(uloc("uSkinned"), 0);
+    glUniform1i(uloc("uInstanced"), 1);                // use aInstModel + uVP path
+    glUniform1f(uloc("uPointSize"), 1.f);
+    glUniformMatrix4fv(uloc("uVP"), 1, GL_FALSE, glm::value_ptr(VP));
+
+    glActiveTexture(GL_TEXTURE0);
+
+    auto draw_pass = [&](bool translucent_pass) {
+        unsigned int last_tex = ~0u;
+        for (auto& im : iw.models) {
+            if (!im.model || im.xforms.empty()) continue;
+            const GLsizei ninst = (GLsizei)im.xforms.size();
+            for (auto& mesh : im.model->meshes) {
+                if (mesh.translucent != translucent_pass) continue;
+                glUniform1i(uloc("uHasTex"), mesh.tex_id ? 1 : 0);
+                glUniform1i(uloc("uTranslucent"), mesh.translucent ? 1 : 0);
+                if (mesh.tex_id != last_tex) { glBindTexture(GL_TEXTURE_2D, mesh.tex_id); last_tex = mesh.tex_id; }
+                glBindVertexArray(mesh.vao);
+                glDrawElementsInstanced(GL_TRIANGLES, mesh.n_indices, GL_UNSIGNED_INT, nullptr, ninst);
+            }
+        }
+    };
+    draw_pass(false);   // opaque first
+    draw_pass(true);    // then translucent (composites over opaque)
+    glBindVertexArray(0);
+
+    glUniform1i(uloc("uInstanced"), 0);   // restore for grid / other paths
+
+    if (show_grid) {
+        glUniformMatrix4fv(uloc("uMVP"), 1, GL_FALSE, glm::value_ptr(VP));
+        glUniform1i(uloc("uWire"), 1);
+        glUniform3f(uloc("uWireCol"), 0.22f, 0.22f, 0.26f);
+        glBindVertexArray(m_grid_vao);
+        glDrawArrays(GL_LINES, 0, m_grid_n);
+        glBindVertexArray(0);
+        glUniform1i(uloc("uWire"), 0);
     }
 
     glUseProgram(0);

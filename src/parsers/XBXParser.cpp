@@ -111,6 +111,50 @@ static std::vector<uint32_t> quadlist_to_list(const uint16_t* idx, size_t n, uin
     return tris;
 }
 
+// NV2A pushbuffer geometry. When a submesh has no flat index buffer (+0x30 == 0)
+// but +0x34/+0x38 are set, the game draws it via D3DDevice_RunPushBuffer — the
+// data is a baked GPU command stream, NOT a flat index list. (Verified in
+// default.xbe: xbx_draw_submesh @0x354560 branches on +0x38.) The stream is a
+// sequence of NV2A method packets; each u32 header encodes
+//     method = hdr & 0x3FFFF        dwordCount = hdr >> 18
+// followed by `dwordCount` payload dwords. Two methods carry geometry:
+//   0x17FC NV097_SET_BEGIN_END   payload[0] = primitive (5=TRI list, 6=strip,
+//                                7=fan, 8=quad; 0 = END marker)
+//   0x1800 NV097_ARRAY_ELEMENT16 each payload dword packs TWO u16 indices (lo,hi)
+// Gather the ARRAY_ELEMENT16 indices and decode them per the BEGIN_END primitive.
+// Verified on ARMORED_THUG "material #1012": prim=5, 8240 indices -> 2746 tris,
+// 0 out-of-range, 0 degenerate, 0 spikes (vs the old strip misread which produced
+// model-spanning spikes). Returns empty on an unrecognized/empty stream.
+static std::vector<uint32_t> pushbuffer_to_list(const uint8_t* d, size_t byte_len, uint32_t vc) {
+    std::vector<uint16_t> indices;
+    int prim = 6;                                   // default strip if no BEGIN_END
+    size_t o = 0;
+    while (o + 4 <= byte_len) {
+        uint32_t hdr    = rd<uint32_t>(d, o); o += 4;
+        uint32_t method = hdr & 0x3FFFF;
+        uint32_t count  = (hdr >> 18) & 0x7FF;      // payload dword count
+        if (count == 0) continue;                   // jump/NOP header, no payload
+        if (o + (size_t)count * 4 > byte_len) break;
+        if (method == 0x17FC) {                     // SET_BEGIN_END
+            uint32_t p = rd<uint32_t>(d, o) & 0xFFFF;
+            if (p != 0) prim = (int)p;              // ignore END (0)
+        } else if (method == 0x1800) {              // ARRAY_ELEMENT16
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t dw = rd<uint32_t>(d, o + (size_t)k * 4);
+                indices.push_back((uint16_t)(dw & 0xFFFF));
+                indices.push_back((uint16_t)(dw >> 16));
+            }
+        }
+        o += (size_t)count * 4;
+    }
+    if (indices.empty()) return {};
+    const uint16_t* idx = indices.data();
+    size_t n = indices.size();
+    if (prim == 5)      return trilist_to_list(idx, n, vc);
+    else if (prim == 8) return quadlist_to_list(idx, n, vc);
+    else                return strip_to_list(idx, n, vc);
+}
+
 XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
     auto buf = read_file(filepath);
     if (buf.size() < 16) return nullptr;
@@ -234,7 +278,6 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
         model->bind_pose[i] = m;
     }
 
-    constexpr uint32_t P38_HDR_SKIP = 6; // uint16s
     const uint32_t STRIDE = 32;
     std::string last_tex_name; // carry forward across all geom_bases
 
@@ -247,24 +290,47 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
         for (uint32_t i = 0; i < sm_cnt; ++i)
             sm_ptrs[i] = rd<uint32_t>(d, geom_base + 0x40 + i*8);
 
-        // fi_start at ptr+0x30; if zero, fall back to ptr+0x38.
-        // When using the p38 fallback, first 6 uint16s are a sub-header — skip them and treat as strip.
-        std::vector<uint32_t> fi_starts(sm_cnt), fi_ends(sm_cnt);
+        // Geometry source per submesh. Field layout confirmed in default.xbe
+        // (xbx_draw_submesh @0x354560 + xbx_load_model/xbx_relocate_geom_ptrs):
+        //   +0x2c = index count
+        //   +0x30 = flat index-buffer ptr (0 if none)
+        //   +0x34 = runtime D3D pushbuffer-resource object (0 in file, set at load)
+        //   +0x38 = raw NV2A pushbuffer DATA ptr (relocated; nonzero => pushbuffer)
+        //   +0x3c = pushbuffer size in bytes
+        // +0x30 set -> flat index buffer decoded by prim_type (+0x28); else the
+        // geometry is the baked NV2A pushbuffer at +0x38 (length +0x3c), parsed by
+        // pushbuffer_to_list. The command bytes are at +0x38, not the +0x34 handle.
+        std::vector<uint32_t> fi_starts(sm_cnt, 0), fi_ends(sm_cnt, 0);
         std::vector<bool>     fi_from_p38(sm_cnt, false);
         for (uint32_t i = 0; i < sm_cnt; ++i) {
+            // sm_ptrs[i] comes straight from the file and is NOT yet validated
+            // here (the per-submesh `ptr + 0x60 > sz` guard is in the draw loop
+            // below). World building models — parsed with primary_geom_only=false,
+            // so every geom chunk is kept — can carry malformed/garbage submesh
+            // pointers; reading +0x2c/0x30/0x38/0x3c off such a pointer via the
+            // unchecked rd<> memcpy walks past the mapped file buffer and crashes.
+            // (This is why both single-world and Load-All crashed while character
+            // models, loaded primary-geom-only, did not.) Bounds-check first; a
+            // submesh that fails leaves fi_starts/ends at 0 and is skipped by the
+            // `fi_starts[si] > 0` dispatch guard.
+            if (sm_ptrs[i] + 0x40 > sz) continue;
             uint32_t p30     = rd<uint32_t>(d, sm_ptrs[i] + 0x30);
             uint32_t idx_cnt = rd<uint32_t>(d, sm_ptrs[i] + 0x2c);
-            uint32_t fi_start;
+            uint32_t fi_start, fi_end;
             if (p30 != 0) {
                 fi_start = p30;
+                fi_end   = fi_start + idx_cnt * 2;
             } else {
-                fi_from_p38[i] = true;
-                fi_start  = rd<uint32_t>(d, sm_ptrs[i] + 0x38);
-                fi_start += P38_HDR_SKIP * 2;
-                idx_cnt   = (idx_cnt > P38_HDR_SKIP) ? idx_cnt - P38_HDR_SKIP : 0;
+                fi_from_p38[i]    = true;
+                fi_start          = rd<uint32_t>(d, sm_ptrs[i] + 0x38);  // pushbuffer data
+                uint32_t pb_bytes = rd<uint32_t>(d, sm_ptrs[i] + 0x3c);  // pushbuffer size
+                // Reject a degenerate/garbage pushbuffer span (also prevents the
+                // unsigned underflow of fi_end - fi_start in pushbuffer_to_list).
+                if (fi_start == 0 || fi_start >= sz || pb_bytes == 0) { fi_from_p38[i] = false; continue; }
+                fi_end = (uint32_t)std::min<uint64_t>((uint64_t)fi_start + pb_bytes, (uint64_t)sz);
             }
             fi_starts[i] = fi_start;
-            fi_ends[i]   = fi_start + idx_cnt * 2;
+            fi_ends[i]   = fi_end;
         }
 
         for (uint32_t si = 0; si < sm_cnt; ++si) {
@@ -485,13 +551,20 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
 
         // ptr+0x28 = raw Xbox D3DPRIMITIVETYPE (IDA sub_354560 passes it straight to
         // DrawIndexedVertices): 5=trilist, 6=tstrip, 7=trifan, 8=quadlist.
-        // p38 path: OOB values are DMA batch dividers; strip decoding skips them
-        // via parity flips and matches the face/body data used by packed meshes.
-        if (n_idx >= 3 && fi_starts[si] > 0 && fi_ends[si] <= sz) {
+        // The decode is chosen by prim_type for BOTH index sources (ptr+0x30 and the
+        // ptr+0x38 fallback). The p38 path is NOT inherently a strip: e.g.
+        // ARMORED_THUG "material #1012" is prim=5 (trilist) with p30=0, and forcing
+        // a strip there slid the window across discrete triangles — every restart
+        // produced model-spanning "spike" triangles (verified: strip → 2429
+        // degenerates + 20 spikes; trilist → 2745 clean tris, 0 spikes). Both the
+        // trilist and quadlist decoders already skip any out-of-range (DMA-divider)
+        // indices, so honoring prim_type here is correct for packed meshes too.
+        if (fi_from_p38[si] && fi_starts[si] > 0 && fi_ends[si] <= sz) {
+            // NV2A pushbuffer: parse the command stream (prim comes from BEGIN_END).
+            sm.indices = pushbuffer_to_list(d + fi_starts[si], fi_ends[si] - fi_starts[si], vc);
+        } else if (n_idx >= 3 && fi_starts[si] > 0 && fi_ends[si] <= sz) {
             const uint16_t* raw = reinterpret_cast<const uint16_t*>(d + fi_starts[si]);
-            if (fi_from_p38[si]) {
-                sm.indices = strip_to_list(raw, n_idx, vc);
-            } else if (prim_type == 5) {
+            if (prim_type == 5) {
                 sm.indices = trilist_to_list(raw, n_idx, vc);
             } else if (prim_type == 8) {
                 sm.indices = quadlist_to_list(raw, n_idx, vc);

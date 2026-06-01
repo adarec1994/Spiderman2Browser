@@ -322,16 +322,31 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
         (fs::path(model_dir) / "textures").string(),
     };
 
+    // Per-directory listing cache. find_texture() is called once per submesh
+    // (~9000 times during "Load All"), and the same sector folders get hit
+    // hundreds of times each. Re-enumerating a directory with vfs::list_dir()
+    // and rebuilding its lowercased filename map on every call dominated the
+    // whole load (~18s / 78% of wall time, measured). Build each directory's map
+    // ONCE and reuse it. Keyed by normalized dir path; value maps
+    // lowercase-filename -> full path.
+    static std::unordered_map<std::string, std::unordered_map<std::string,std::string>> s_dir_cache;
+
     for (auto& dir : search_dirs) {
-        if (!vfs::is_directory(dir)) continue;
-        std::unordered_map<std::string, std::string> lmap;
-        for (auto& entry : vfs::list_dir(dir)) {
-            if (entry.is_dir) continue;  // skip directories
-            std::string fn = fs::path(entry.path).filename().string();
-            std::string fnl = fn;
-            std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
-            lmap[fnl] = entry.path;
+        auto dit = s_dir_cache.find(dir);
+        if (dit == s_dir_cache.end()) {
+            std::unordered_map<std::string,std::string> lmap;
+            if (vfs::is_directory(dir)) {
+                for (auto& entry : vfs::list_dir(dir)) {
+                    if (entry.is_dir) continue;
+                    std::string fnl = fs::path(entry.path).filename().string();
+                    std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+                    lmap.emplace(std::move(fnl), entry.path);
+                }
+            }
+            dit = s_dir_cache.emplace(dir, std::move(lmap)).first;
         }
+        const auto& lmap = dit->second;
+        if (lmap.empty()) continue;
         for (auto& v : variants) {
             std::string vl = v;
             std::transform(vl.begin(), vl.end(), vl.begin(), ::tolower);

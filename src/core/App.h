@@ -101,15 +101,39 @@ private:
 
     struct WorldDrawCall { GPUModel* model; glm::mat4 xform; };
     std::vector<WorldDrawCall> m_world_draws;
+    // Instanced world: placements grouped per unique model, drawn with instanced
+    // draw calls (built once after a world load). Replaces the per-instance draw
+    // path — collapsing tens of thousands of draws to ~one per unique submesh and
+    // removing the per-instance frustum cull that made big terrain vanish up
+    // close. The referenced GPUModels stay owned by m_world_gpu_cache.
+    InstancedWorld m_instanced_world;
+    // World bbox of all instance origins, accumulated during build_world_draws so
+    // recentre_camera_on_world() works even after the per-instance draw list is
+    // freed by the merge.
+    glm::vec3 m_world_bb_min{ 1e9f}, m_world_bb_max{-1e9f};
     bool m_world_mode = false;
+    // "Load All" is requested from an ImGui button callback, which runs in the
+    // MIDDLE of an open ImGui frame. load_all_worlds() pumps its own frames
+    // (NewFrame/Render/Swap) for the progress bar, so it must NOT run nested
+    // inside that frame (ImGui asserts). The callback sets this flag; run()
+    // services it at the top of the loop, before the frame begins.
+    bool m_pending_load_all = false;
 
     GPUModel* world_get_or_load_model(const std::string& asset_name);
     void      load_sector_terrain(const std::string& dat_path);
     void      build_world_draws(const WorldData& wd);
+    // Group m_world_draws by unique model into m_instanced_world (instanced draw
+    // calls). The per-model GPU geometry is SHARED (kept in m_world_gpu_cache),
+    // so nothing is freed here. Called once after a world load.
+    void      finalize_world_merge();
     void      recentre_camera_on_world();
     void      load_world(const std::string& dat_path);
     void      load_all_worlds();
     void      clear_world();
+    // Pump one minimal frame (poll events + clear + progress bar + swap) so the
+    // window stays responsive during a long synchronous world load instead of
+    // going "Not Responding". label/frac drive a centred progress overlay.
+    void      pump_loading_frame(const char* label, float frac);
     // ─────────────────────────────────────────────────────────────────────────
 
     void load_file(int idx);

@@ -837,7 +837,9 @@ void App::setup_callbacks() {
         if (i >= 0 && i < (int)m_ui_state.world_files.size())
             load_world(m_ui_state.world_files[i]);
     };
-    m_ui_cb.on_load_all_worlds = [this](){ load_all_worlds(); };
+    // Defer the heavy load out of this ImGui-frame-time callback; run() services
+    // the flag at the top of the loop where no ImGui frame is open.
+    m_ui_cb.on_load_all_worlds = [this](){ m_pending_load_all = true; };
 }
 
 // ── Scan + Load ───────────────────────────────────────────────────────────────
@@ -892,6 +894,7 @@ void App::scan_folder(const std::string& folder) {
         }
         std::sort(m_ui_state.world_files.begin(), m_ui_state.world_files.end());
     }
+
 
     // ── XBX registry: lowercase_stem → absolute_path ─────────────────────────
     m_xbx_registry.clear();
@@ -953,9 +956,14 @@ void App::scan_folder(const std::string& folder) {
 // ── World loading ─────────────────────────────────────────────────────────────
 
 void App::clear_world() {
+    // Release the instanced world FIRST (its per-instance buffers reference, but
+    // don't own, the cache models), then free the cache geometry.
+    m_instanced_world.release();
     for (auto& [k, gm] : m_world_gpu_cache) { if (gm) { gm->release(); delete gm; } }
     m_world_gpu_cache.clear();
     m_world_draws.clear();
+    m_world_bb_min = glm::vec3( 1e9f);
+    m_world_bb_max = glm::vec3(-1e9f);
     m_world_mode = false;
     m_cam.fly    = false;    // restore orbit camera
     m_fly_look   = false;
@@ -1078,10 +1086,17 @@ void App::build_world_draws(const WorldData& wd) {
         std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s;
     };
 
+    auto acc_bb = [&](const glm::mat4& xf) {
+        glm::vec3 p = glm::vec3(xf[3]);
+        m_world_bb_min = glm::min(m_world_bb_min, p);
+        m_world_bb_max = glm::max(m_world_bb_max, p);
+    };
+
     for (auto& inst : wd.instances) {
         GPUModel* gm = world_get_or_load_model(inst.asset_name);
         if (!gm) continue;
         m_world_draws.push_back({ gm, inst.transform });
+        acc_bb(inst.transform);
     }
     for (auto& prop : wd.props) {
         if (prop.type_idx < 0 || prop.type_idx >= (int)wd.prop_types.size()) continue;
@@ -1091,20 +1106,36 @@ void App::build_world_draws(const WorldData& wd) {
         glm::mat4 xf = glm::translate(glm::mat4(1.f), glm::vec3(prop.x, prop.y, prop.z));
         xf = glm::rotate(xf, yr, glm::vec3(0.f, 1.f, 0.f));
         m_world_draws.push_back({ gm, xf });
+        acc_bb(xf);
     }
 
 }
 
-void App::recentre_camera_on_world() {
+void App::finalize_world_merge() {
     if (m_world_draws.empty()) return;
 
-    // Compute bounding box of all draw call origins
-    glm::vec3 mn(1e9f), mx(-1e9f);
-    for (auto& dc : m_world_draws) {
-        glm::vec3 p = glm::vec3(dc.xform[3]);
-        mn = glm::min(mn, p);
-        mx = glm::max(mx, p);
-    }
+    // Group placements by unique model into instanced draw calls. The geometry is
+    // SHARED with m_world_gpu_cache (one copy per unique model), so we keep the
+    // cache alive — m_instanced_world only adds a small per-instance transform
+    // buffer per unique model.
+    std::vector<std::pair<GPUModel*, glm::mat4>> insts;
+    insts.reserve(m_world_draws.size());
+    for (auto& dc : m_world_draws) insts.push_back({ dc.model, dc.xform });
+
+    m_instanced_world.release();
+    m_instanced_world = m_renderer.build_instanced_world(insts);
+
+    // m_world_draws is no longer used for rendering (the instanced world is), but
+    // its pointers remain valid (owned by m_world_gpu_cache). Clear it to free the
+    // per-placement bookkeeping; keep the cache + instanced world intact.
+    m_world_draws.clear();
+}
+
+void App::recentre_camera_on_world() {
+    // Use the bbox accumulated during build_world_draws (valid even after the
+    // per-instance draw list has been freed by the merge).
+    glm::vec3 mn = m_world_bb_min, mx = m_world_bb_max;
+    if (mn.x > mx.x) return;  // nothing accumulated
     glm::vec3 centre = (mn + mx) * 0.5f;
     float     extent = glm::length(mx - mn);
 
@@ -1167,13 +1198,43 @@ void App::load_world(const std::string& dat_path) {
 
     build_world_draws(*wd);
     load_sector_terrain(dat_path);
+    finalize_world_merge();   // bake into per-texture batches; free per-model GPU buffers
     recentre_camera_on_world();
+    m_world_mode                     = true;
+    m_ui_state.world_mode            = true;
     m_ui_state.world_instance_count  = (int)wd->instances.size();
     m_ui_state.world_prop_count      = (int)wd->props.size();
     m_ui_state.world_dat_path        = dat_path;
     m_ui_state.world_load_progress   = -1.f;  // hide bar
     m_ui_state.status_msg            = "World loaded";
     delete wd;
+}
+
+void App::pump_loading_frame(const char* label, float frac) {
+    glfwPollEvents();
+    glfwGetFramebufferSize(m_window, &m_w, &m_h);
+    glViewport(0, 0, m_w, m_h);
+    glClearColor(0.07f, 0.07f, 0.09f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::SetNextWindowPos({ m_w * 0.5f, m_h * 0.5f }, ImGuiCond_Always, { 0.5f, 0.5f });
+    ImGui::SetNextWindowBgAlpha(0.9f);
+    ImGui::Begin("##loading", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::TextColored({ 0.4f, 1.f, 0.6f, 1.f }, "Loading all world sectors...");
+    ImGui::Dummy({ 360.f, 2.f });
+    ImGui::ProgressBar(frac, { 360.f, 0.f });
+    if (label && *label) ImGui::TextDisabled("%s", label);
+    ImGui::End();
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    glfwSwapBuffers(m_window);
 }
 
 void App::load_all_worlds() {
@@ -1189,7 +1250,13 @@ void App::load_all_worlds() {
     int total_inst = 0, total_props = 0;
     for (int fi = 0; fi < n_files; ++fi) {
         m_ui_state.world_load_progress = (float)fi / n_files;
-        m_ui_state.world_load_status   = fs::path(m_ui_state.world_files[fi]).filename().string();
+        std::string fname = fs::path(m_ui_state.world_files[fi]).filename().string();
+        m_ui_state.world_load_status   = fname;
+
+        // Keep the window alive + show progress so a 400+ file load doesn't read
+        // as a freeze ("Not Responding"). Pump every few files to amortise cost.
+        if (fi % 4 == 0)
+            pump_loading_frame(fname.c_str(), (float)fi / n_files);
 
         WorldData* wd = parse_world(m_ui_state.world_files[fi]);
         if (!wd) continue;
@@ -1200,6 +1267,8 @@ void App::load_all_worlds() {
         delete wd;
     }
 
+    pump_loading_frame("Merging geometry...", 1.f);
+    finalize_world_merge();   // group placements into instanced draws (geometry shared)
     recentre_camera_on_world();
     m_world_mode                     = true;
     m_ui_state.world_mode            = true;
@@ -1320,6 +1389,14 @@ void App::run() {
         glfwPollEvents();
         glfwGetFramebufferSize(m_window,&m_w,&m_h);
 
+        // Service a deferred "Load All" here — OUTSIDE any open ImGui frame — so
+        // load_all_worlds() can safely pump its own progress frames.
+        if (m_pending_load_all) {
+            m_pending_load_all = false;
+            load_all_worlds();
+            m_last_frame = glfwGetTime();
+        }
+
         double now = glfwGetTime();
 
         // ── Fly cam WASD tick ─────────────────────────────────────────────────
@@ -1389,7 +1466,12 @@ void App::run() {
         ImGui::Render();
 
         int w=vp_w(m_w);
-        if (m_world_mode && !m_world_draws.empty()) {
+        if (m_world_mode && !m_instanced_world.models.empty()) {
+            // Instanced path: one instanced draw per unique submesh (no per-instance
+            // cull → terrain no longer vanishes up close).
+            m_renderer.draw_instanced_world(m_cam, vp_x(), w, m_h, m_instanced_world);
+        } else if (m_world_mode && !m_world_draws.empty()) {
+            // Fallback per-instance path (kept for safety if the build produced nothing).
             std::vector<std::pair<GPUModel*, glm::mat4>> draws;
             draws.reserve(m_world_draws.size());
             for (auto& dc : m_world_draws) draws.push_back(std::make_pair(dc.model, dc.xform));
@@ -1406,6 +1488,7 @@ void App::run() {
 void App::shutdown() {
     if (m_gpu_model) { m_gpu_model->release(); delete m_gpu_model; }
     if (m_gpu_skel)  { m_gpu_skel->release();  delete m_gpu_skel; }
+    m_instanced_world.release();
     for (auto& [k, gm] : m_world_gpu_cache) { if (gm) { gm->release(); delete gm; } }
     m_world_gpu_cache.clear();
     m_renderer.shutdown();

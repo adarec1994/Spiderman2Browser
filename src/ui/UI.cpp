@@ -216,11 +216,8 @@ void UI::draw(UIState& state, UICallbacks& cb,
             if (n_world > 0) {
                 if (ImGui::Button("Load All", {-1, 0}))
                     if (cb.on_load_all_worlds) cb.on_load_all_worlds();
-            } else {
-                ImGui::TextDisabled("No world files found.");
-                ImGui::TextDisabled("Scan a folder first.");
+                ImGui::Separator();
             }
-            ImGui::Separator();
 
             static char wsearch[128] = {};
             ImGui::SetNextItemWidth(-1);
