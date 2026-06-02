@@ -15,6 +15,7 @@
 namespace fs = std::filesystem;
 
 static std::unordered_map<std::string, unsigned int> g_cache;
+std::string g_diag_last_tex_path;  // diagnostic: path of last resolved texture
 
 // ── DDS loader ────────────────────────────────────────────
 struct DDSPixelFormat {
@@ -43,7 +44,8 @@ static unsigned int load_dds(const std::string& path) {
     std::memcpy(&hdr, fp + fpos, sizeof(hdr)); fpos += sizeof(hdr);
 
     uint32_t w = hdr.width, h = hdr.height;
-    uint32_t mips = std::max(1u, hdr.mipMapCount);
+    uint32_t file_mips = hdr.mipMapCount;          // 0 = none; may be a PARTIAL chain
+    uint32_t mips = std::max(1u, file_mips);
 
     // Determine format
     uint32_t gl_fmt = 0;
@@ -83,7 +85,18 @@ static unsigned int load_dds(const std::string& path) {
         offset += sz;
         ww=std::max(1u,ww/2); hh=std::max(1u,hh/2);
     }
-    if (mips == 1) glGenerateMipmap(GL_TEXTURE_2D);
+    // Mip-chain completeness. Many SM2 DDS ship a PARTIAL chain that stops before
+    // 1x1 (e.g. 128x256 with mipMapCount=8 ends at 1x2; a full chain needs 9).
+    // OpenGL's default GL_TEXTURE_MAX_LEVEL is 1000, so it treats such a texture
+    // as mipmap-INCOMPLETE and samples it as solid BLACK when minified — which is
+    // exactly why tall/distant buildings (ESB, cranes, plaza floors…) rendered
+    // black. Cap MAX_LEVEL to the levels we actually uploaded so GL considers the
+    // texture complete. When the file has 0/1 mips, generate a full chain instead.
+    if (file_mips <= 1) {
+        glGenerateMipmap(GL_TEXTURE_2D);
+    } else {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)(mips - 1));
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
     return tid;
 }
@@ -153,16 +166,23 @@ void build_tex_registry(const std::string& root_dir) {
         }
     }
 
-    // ── Pass 2: resolve IFL references (.sg_ files) ──────────────────────────
+    // ── Pass 2: resolve IFL references (.sg_ / .sd_ / .s_b / .s_t manifests) ──
     // IFL (Image File List) files are tiny text files mapping an _ifl texture
-    // name to the real texture filename.  e.g. SG_ALLEYWALL_IFL.sg_ contains
-    // "sg_blg_alleywall01_res.tga".  We read each .sg_ file, resolve the
-    // referenced texture through the registry, and add the IFL stem as an alias.
+    // name to the real texture filename(s). The model's material references the
+    // IFL stem (e.g. "sd_blg_strwal_com_ifl"); the manifest's FIRST line is the
+    // texture to use.  e.g. SD_BLG_STRWAL_COM_IFL.sd_ contains
+    // "sd_blg_strwal01.tga" → resolves to SD_BLG_STRWAL01.dds.
+    // The SAME format ships under several extensions across the city packs:
+    //   .sg_  (CITY_STRIP shared), .sd_ (CITY\CITY_STRIP_* colocated).
+    // (.s_b/.s_t building masters are multi-line and handled in Pass 3.)
+    // (Missing the .sd_ extension was why store/mall/building models in
+    // CITY\CITY_STRIP_* rendered untextured — their walls/windows/awnings are
+    // ALL referenced through _ifl manifests, never as direct texture names.)
     for (auto& fpath : all) {
         std::string fnl = fs::path(fpath).filename().string();
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
         std::string ext2 = fs::path(fnl).extension().string();
-        if (ext2 != ".sg_") continue;
+        if (ext2 != ".sg_" && ext2 != ".sd_") continue;
 
         // IFL stem: e.g. "sg_alleywall_ifl"
         std::string ifl_stem = fs::path(fnl).stem().string();
@@ -207,6 +227,66 @@ void build_tex_registry(const std::string& root_dir) {
         }
     }
 
+    // ── Pass 3: resolve building/multi-texture manifests (.s_b / .s_t) ───────
+    // Building-block models (shader "smlego") reference a single "master"
+    // material name, e.g. "s_blg_blgmaster", whose real faces live in a text
+    // manifest GAME\CITY\S_BLG_BLGMASTER.s_b — a CRLF-separated list of the
+    // actual face textures:
+    //     s_blg_01sid1_com.tga
+    //     s_blg_04sid1_com.tga
+    //     ...
+    // The faces themselves (S_BLG_01SID1_COM.dds, …) are indexed in pass 1, but
+    // "s_blg_blgmaster" resolves to nothing → buildings render untextured (gray).
+    // Alias the manifest stem to its FIRST resolvable listed texture so the
+    // building gets a representative facade texture. (Full per-face/atlas mapping
+    // would need the model's UV regions; first-face is the pragmatic fix.)
+    for (auto& fpath : all) {
+        std::string fnl = fs::path(fpath).filename().string();
+        std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
+        std::string ext2 = fs::path(fnl).extension().string();
+        if (ext2 != ".s_b" && ext2 != ".s_t") continue;
+
+        std::string man_stem = fs::path(fnl).stem().string();   // e.g. "s_blg_blgmaster"
+        if (g_registry.count(man_stem)) continue;
+
+        std::vector<uint8_t> data = vfs::read_file(fpath);
+        if (data.empty()) continue;
+        std::string text(reinterpret_cast<const char*>(data.data()), data.size());
+
+        // Walk lines; alias the manifest to the first listed texture that exists.
+        size_t pos = 0;
+        while (pos < text.size()) {
+            size_t nl = text.find_first_of("\r\n", pos);
+            std::string line = text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
+            pos = (nl == std::string::npos) ? text.size() : nl + 1;
+            // trim
+            while (!line.empty() && (line.back()==' '||line.back()=='\t'||line.back()=='\r'||line.back()=='\n'))
+                line.pop_back();
+            if (line.empty()) continue;
+            std::transform(line.begin(), line.end(), line.begin(), ::tolower);
+            std::string ref_stem = fs::path(line).stem().string();
+            if (ref_stem.empty()) continue;
+            auto it = g_registry.find(ref_stem);
+            if (it != g_registry.end()) {
+                g_registry[man_stem] = it->second;
+                g_stems_sorted.push_back(man_stem);
+                break;   // first resolvable face wins
+            }
+        }
+    }
+
+    std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
+}
+
+void register_tex_alias(const std::string& alias, const std::string& target_stem) {
+    if (alias.empty() || target_stem.empty()) return;
+    std::string a = alias;       std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+    std::string t = target_stem; std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+    if (g_registry.count(a)) return;             // first cell wins; don't clobber
+    auto it = g_registry.find(t);                // target must already be indexed
+    if (it == g_registry.end()) return;
+    g_registry[a] = it->second;
+    g_stems_sorted.push_back(a);
     std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
 }
 
@@ -239,7 +319,7 @@ static unsigned int registry_lookup(const std::string& hint) {
     };
     for (auto& t : tries) {
         auto it = g_registry.find(t);
-        if (it != g_registry.end()) return load_texture(it->second);
+        if (it != g_registry.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
     }
 
     // IFL alias: "s_str_bas1" → try "s_str_bas1_ifl" which may have been
@@ -250,7 +330,7 @@ static unsigned int registry_lookup(const std::string& hint) {
         for (int i = 0; suffixes[i]; ++i) {
             std::string key = basel + suffixes[i];
             auto it = g_registry.find(key);
-            if (it != g_registry.end()) return load_texture(it->second);
+            if (it != g_registry.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
         }
     }
 
@@ -280,7 +360,7 @@ static unsigned int registry_lookup(const std::string& hint) {
             std::string best = best_numbered.empty() ? best_named : best_numbered;
             if (!best.empty()) {
                 auto rit = g_registry.find(best);
-                if (rit != g_registry.end()) return load_texture(rit->second);
+                if (rit != g_registry.end()) { g_diag_last_tex_path = rit->second; return load_texture(rit->second); }
             }
             // No match at this level -- strip last _segment and retry
             auto pos = cur.rfind('_');
@@ -351,7 +431,7 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
             std::string vl = v;
             std::transform(vl.begin(), vl.end(), vl.begin(), ::tolower);
             auto it = lmap.find(vl);
-            if (it != lmap.end()) return load_texture(it->second);
+            if (it != lmap.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
         }
     }
 

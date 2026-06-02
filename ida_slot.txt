@@ -1,0 +1,47 @@
+int blg_material_init()
+{
+  int i; // esi
+  char *v1; // eax
+  _BYTE *v2; // edx
+  char v3; // cl
+  char *v4; // edi
+  int result; // eax
+  unsigned int v7[7]; // [esp+8h] [ebp-124h] BYREF
+  char v8; // [esp+27h] [ebp-105h] BYREF
+  _BYTE v9[256]; // [esp+28h] [ebp-104h] BYREF
+  int v10; // [esp+128h] [ebp-4h]
+
+  v10 = dword_4EE930;
+  nal_name_hash_rotxor(v7, "s_blg_blgmaster");
+  dword_502254 = sub_3421D0(v7);
+  nal_name_hash_rotxor(v7, "s_blg_ngt_gls");
+  dword_502258 = sub_3421D0(v7);
+  nal_name_hash_rotxor(v7, "s_blg_envmap1");
+  dword_50225C = sub_3421D0(v7);
+  nal_name_hash_rotxor(v7, "s_blg_trm");
+  dword_502260 = sub_3421D0(v7);
+  nal_name_hash_rotxor(v7, "s_blg_pedmaster");
+  dword_502264 = sub_3421D0(v7);
+  dword_502228 = (LPVOID)sub_228070(144);
+  for ( i = 0; i < 36; ++i )
+  {
+    v1 = off_4D2508[i];
+    v2 = (_BYTE *)(v9 - v1);
+    do
+    {
+      v3 = *v1;
+      v1[(_DWORD)v2] = *v1;
+      ++v1;
+    }
+    while ( v3 );
+    v4 = &v8;
+    while ( *++v4 )
+      ;
+    *(_DWORD *)v4 = &loc_303030;
+    nal_name_hash_rotxor(v7, v9);
+    result = sub_3469A0(v7);
+    *(_DWORD *)((char *)dword_502228 + i * 4) = result;
+  }
+  byte_502268 = 1;
+  return result;
+}

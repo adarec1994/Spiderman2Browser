@@ -979,14 +979,30 @@ void App::clear_world() {
 GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
     if (asset_name.empty()) return nullptr;
 
-    // Garbage filter: real names are ALL-CAPS or all-lowercase. Binary junk is mixed (e.g. "h4bC").
+    // Garbage filter: reject pure binary junk (e.g. "h4bC"). Real asset names are
+    // clean single-case identifiers, but the heuristic world parser sometimes
+    // prepends a junk/cell-prefix token before the real name (e.g.
+    // "Vc22_i01front003" → "i01front003", "Djxd_bulbcage000" → "bulbcage000").
+    // Such names have a mixed-case junk token but a CLEAN suffix token that the
+    // underscore-walk below recovers. Only bail if NO '_'-separated token is a
+    // clean identifier: >=3 chars, >=1 letter, no punctuation, not mixed-case.
     {
-        bool has_upper = false, has_lower = false;
-        for (char ch : asset_name) {
-            if (std::isupper((unsigned char)ch)) has_upper = true;
-            if (std::islower((unsigned char)ch)) has_lower = true;
+        bool any_clean = false;
+        size_t i = 0, n = asset_name.size();
+        while (i < n && !any_clean) {
+            size_t j = i;
+            while (j < n && asset_name[j] != '_') ++j;
+            int len = (int)(j - i), letters = 0, up = 0, lo = 0, other = 0;
+            for (size_t k = i; k < j; ++k) {
+                unsigned char c = (unsigned char)asset_name[k];
+                if      (std::isupper(c)) { ++up; ++letters; }
+                else if (std::islower(c)) { ++lo; ++letters; }
+                else if (!std::isdigit(c)) ++other;
+            }
+            if (len >= 3 && letters >= 1 && other == 0 && !(up && lo)) any_clean = true;
+            i = j + 1;
         }
-        if (has_upper && has_lower) return nullptr;
+        if (!any_clean) return nullptr;
     }
 
     std::string key = asset_name;
@@ -1092,8 +1108,40 @@ void App::build_world_draws(const WorldData& wd) {
         m_world_bb_max = glm::max(m_world_bb_max, p);
     };
 
+    // Register this cell's building-atlas master->texture aliases BEFORE loading
+    // its models, so building blocks (smlego: s_blg_blgmaster/pedmaster, s_blg_trm)
+    // resolve to a real wall texture instead of rendering gray. The full per-face
+    // slot system (per-side textures) isn't reproduced; we pick a representative
+    // texture per master — for blgmaster prefer a "sid1" wall, for pedmaster a
+    // "ped" face, for trm the first trim — which makes buildings read as brick/
+    // stone. First cell to define a master wins (models are globally cached).
+    {
+        auto pick = [&](const std::string& master, const char* prefer) -> std::string {
+            std::string best;
+            for (auto& bt : wd.blg_textures) {
+                if (bt.master != master) continue;
+                if (best.empty()) best = bt.texture;                 // fallback: first
+                if (bt.texture.find(prefer) != std::string::npos) return bt.texture; // preferred
+            }
+            return best;
+        };
+        std::string wall = pick("s_blg_blgmaster", "sid1");
+        std::string ped  = pick("s_blg_pedmaster", "pedbas1");
+        std::string trm  = pick("s_blg_trm",       "trm");
+        if (!wall.empty()) register_tex_alias("s_blg_blgmaster", wall);
+        if (!ped.empty())  register_tex_alias("s_blg_pedmaster", ped);
+        if (!trm.empty())  register_tex_alias("s_blg_trm",       trm);
+    }
+
     for (auto& inst : wd.instances) {
         GPUModel* gm = world_get_or_load_model(inst.asset_name);
+        // Fallback: the instance NAME encodes the asset (cell_S_ASSET, e.g.
+        // "C15_S_TRFFLITE00" → "s_trfflite", "H_H_RFACCESSA" → "rfaccessa"). When
+        // the parsed asset ref is empty/unresolved, derive from the name — the
+        // underscore-walk strips the cell/group prefix. Logical markers
+        // (SPAWNPOINT/_TRIG/MARK_FACING) simply won't resolve and stay skipped.
+        if (!gm && !inst.name.empty() && inst.name != inst.asset_name)
+            gm = world_get_or_load_model(inst.name);
         if (!gm) continue;
         m_world_draws.push_back({ gm, inst.transform });
         acc_bb(inst.transform);
@@ -1137,14 +1185,24 @@ void App::recentre_camera_on_world() {
     glm::vec3 mn = m_world_bb_min, mx = m_world_bb_max;
     if (mn.x > mx.x) return;  // nothing accumulated
     glm::vec3 centre = (mn + mx) * 0.5f;
-    float     extent = glm::length(mx - mn);
+    glm::vec3 size   = mx - mn;
+    float     extent = glm::length(size);
 
-    // Start above and behind the scene, looking toward centre
-    glm::vec3 start = centre + glm::vec3(0.f, extent * 0.15f, extent * 0.4f);
+    // Spawn the camera AT a human/street scale just above the scene, NOT
+    // proportional to the whole-city extent. The old `centre + extent*0.4`
+    // parked the eye thousands of units away for a full "Load All" (city
+    // extent ~6000), collapsing everything into a dark sliver on the horizon —
+    // which read as "all black". Use a modest absolute standoff so you start
+    // inside the city looking along it. Height tracks the scene's vertical size
+    // (so single-cell loads frame nicely too) but is clamped to a sane range.
+    float height  = glm::clamp(size.y * 1.5f + 40.f, 40.f, 400.f);
+    float standoff = glm::clamp(std::max(size.x, size.z) * 0.10f, 60.f, 600.f);
+    glm::vec3 start = centre + glm::vec3(0.f, height, standoff);
     m_cam.reset_fly(start);
-    m_cam.fly_speed = glm::clamp(extent * 0.05f, 10.f, 2000.f);
+    // Fly speed scaled to the scene but bounded so it's controllable.
+    m_cam.fly_speed = glm::clamp(extent * 0.04f, 20.f, 400.f);
 
-    // Aim the camera at the scene centre
+    // Aim the camera at the scene centre.
     glm::vec3 dir = glm::normalize(centre - start);
     m_cam.yaw   = glm::degrees(atan2f(dir.x, dir.z));
     m_cam.pitch = glm::degrees(asinf(glm::clamp(dir.y, -1.f, 1.f)));
@@ -1396,8 +1454,12 @@ void App::run() {
             load_all_worlds();
             m_last_frame = glfwGetTime();
         }
-
         double now = glfwGetTime();
+
+        static int s_la = 0;
+        if (s_la == 0 && std::getenv("SM2_LOADALL")) { s_la = 1; m_pending_load_all = true; }
+        else if (s_la == 1 && std::getenv("SM2_LOADALL")) { s_la = 2; }
+        else if (s_la == 2 && std::getenv("SM2_LOADALL")) { glfwSetWindowShouldClose(m_window, 1); }
 
         // ── Fly cam WASD tick ─────────────────────────────────────────────────
         if (m_world_mode && m_cam.fly && !ImGui::GetIO().WantCaptureKeyboard) {

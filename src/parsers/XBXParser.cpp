@@ -200,6 +200,7 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
     // sm_cnt=1), while character XBXes have a single GEO container with sm_cnt=N.
     // Both cases are handled by iterating all containers.
     std::vector<uint32_t> geom_bases;
+    int dbg_skip_big = 0, dbg_skip_oob = 0, dbg_geo_chunks = 0;
     {
         uint32_t n_ch = rd<uint32_t>(d, 0x08);
         for (uint32_t ci = 0; ci < n_ch; ++ci) {
@@ -208,10 +209,12 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
             uint32_t ctype = rd<uint32_t>(d, base);
             uint32_t ptr   = rd<uint32_t>(d, base + 4);
             if ((ctype >> 24) != 0x02) continue;
+            ++dbg_geo_chunks;
             uint32_t gb = ptr + 4;
-            if (gb + 0x48 > sz) continue;
+            if (gb + 0x48 > sz) { ++dbg_skip_oob; continue; }
             uint32_t smc = rd<uint32_t>(d, gb + 0x04);
-            if (smc == 0 || smc > 64) continue;
+            if (smc == 0) continue;
+            if (smc > 64) { ++dbg_skip_big; continue; }
             geom_bases.push_back(gb);
         }
     }
@@ -481,17 +484,56 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
 
         uint32_t n_idx = (fi_ends[si] - fi_starts[si]) / 2;
 
-        // UV offset varies by stride:
-        //   stride=24: xyz(12) + uv(8) + packed(4)
-        //   stride=32: xyz(12) + packed(4) + uv(8) + bone(8)
-        //   stride=36: xyz(12) + normal(12) + uv(8) + ...
-        // UV offset by stride; clamp so we don't read past the vertex
-        uint32_t uv_off;
-        if      (stride == 36)               uv_off = 24u;
-        else if (stride == 24 || stride == 20) uv_off = 12u;
-        else if (stride >= 24)               uv_off = 16u;
-        else                                 uv_off = 0u;  // stride=16: no room for float UV
-        if (uv_off + 8u > stride)            uv_off = 0u;  // safety clamp
+        // ── UV0 offset detection (data-driven) ────────────────────────────────
+        // The byte offset of UV0 within a vertex depends on the vertex declaration,
+        // which is keyed on the shader — NOT a simple function of stride (e.g. both
+        // smlegosimple walls and smtranslucent smoke are stride 28, but UV0 lives at
+        // +20 vs +16 respectively). World vertex formats pack normal/color into bytes
+        // that read back as NaN / denormal / out-of-range floats, so the first
+        // 4-byte-aligned pair of *plausible* float UVs after XYZ is UV0. A genuine
+        // float3 normal (skinned character models) is skipped via a unit-length test
+        // so those formats keep their existing UV0 at +24. Verified against real D33
+        // geometry: smsimple/grass/roof/street/sign +12, smtranslucent/fxenv +16,
+        // smlegosimple/smlego +20, skinned-char +24.
+        auto uv_ok = [](float v) {
+            if (!std::isfinite(v)) return false;
+            float a = std::fabs(v);
+            if (a > 64.0f) return false;          // tiling UVs stay well under this
+            if (a != 0.0f && a < 1e-4f) return false; // packed-byte artifact, not a UV
+            return true;
+        };
+        uint32_t nsamp = std::min<uint32_t>(vc, 32u);
+        uint32_t uv_off = 0xFFFFFFFFu;
+        for (uint32_t o = 12; o + 8u <= stride; o += 4u) {
+            // Skip a float3 normal: if (o,o+4,o+8) is consistently unit-length it is
+            // a normal, not UVs — advance past all 12 of its bytes.
+            if (o + 12u <= stride) {
+                int unit = 0, tot = 0;
+                for (uint32_t s = 0; s < nsamp; ++s) {
+                    size_t b = vo + (size_t)s * stride;
+                    float x = rd<float>(d,b+o), y = rd<float>(d,b+o+4), z = rd<float>(d,b+o+8);
+                    if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+                        float m = x*x + y*y + z*z; ++tot;
+                        if (m > 0.92f && m < 1.08f) ++unit;
+                    }
+                }
+                if (tot > 0 && unit >= (int)(tot * 0.8f)) { o += 8u; continue; } // +=4 in loop → skip 12
+            }
+            int ok = 0;
+            for (uint32_t s = 0; s < nsamp; ++s) {
+                size_t b = vo + (size_t)s * stride;
+                if (uv_ok(rd<float>(d,b+o)) && uv_ok(rd<float>(d,b+o+4))) ++ok;
+            }
+            if (nsamp > 0 && ok >= (int)(nsamp * 0.9f)) { uv_off = o; break; }
+        }
+        if (uv_off == 0xFFFFFFFFu) {
+            // Fallback: original per-stride heuristic.
+            if      (stride == 36)                 uv_off = 24u;
+            else if (stride == 24 || stride == 20) uv_off = 12u;
+            else if (stride >= 24)                 uv_off = 16u;
+            else                                   uv_off = 0u;
+            if (uv_off + 8u > stride)              uv_off = 0u;
+        }
 
         // ── Bone palette: count at ptr+0x08, offset at ptr+0x0c ──
         uint32_t pal_cnt = rd<uint32_t>(d, ptr + 0x08);
@@ -604,6 +646,20 @@ XBXModel* parse_xbx(const std::string& filepath, bool primary_geom_only) {
         } // end inner sm loop
     } // end geom_bases loop
 
+    if (std::getenv("SM2_GEOMDBG")) {
+        const char* fn = filepath.c_str();
+        for (const char* p=filepath.c_str(); *p; ++p) if(*p=='/'||*p=='\\') fn=p+1;
+        float mnx=1e9f,mny=1e9f,mnz=1e9f,mxx=-1e9f,mxy=-1e9f,mxz=-1e9f;
+        for (auto& s : model->submeshes) for (auto& p : s.positions) {
+            mnx=std::min(mnx,p.x); mny=std::min(mny,p.y); mnz=std::min(mnz,p.z);
+            mxx=std::max(mxx,p.x); mxy=std::max(mxy,p.y); mxz=std::max(mxz,p.z);
+        }
+        FILE* lf=fopen("geomdbg.log","a");
+        if(lf){ fprintf(lf,"%s geo_chunks=%d used=%zu skip_big=%d skip_oob=%d submeshes=%zu bbox=%.0fx%.0fx%.0f\n",
+            fn, dbg_geo_chunks, geom_bases.size(), dbg_skip_big, dbg_skip_oob, model->submeshes.size(),
+            mxx-mnx, mxy-mny, mxz-mnz);
+            fclose(lf); }
+    }
     if (model->submeshes.empty()) { delete model; return nullptr; }
     return model;
 }

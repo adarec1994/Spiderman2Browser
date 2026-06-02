@@ -4,6 +4,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <filesystem>
+#include <fstream>
 #include <vector>
 #include <cstring>
 #include <utility>
@@ -596,8 +597,15 @@ void Renderer::draw_instanced_world(const Camera& cam, int vp_x, int vp_w, int v
             }
         }
     };
-    draw_pass(false);   // opaque first
-    draw_pass(true);    // then translucent (composites over opaque)
+    draw_pass(false);   // opaque first (depth write on)
+    // Translucent pass: glow/decal/glass FX (smtranslucent — e.g. lamp-light
+    // cones "s_dcl_lamplite1_a", billboard smoke). These must NOT write depth or
+    // they occlude the city behind them as solid shapes (the "white cone spikes"
+    // erupting from every streetlight). Keep depth TEST so they're hidden behind
+    // solid geometry, but disable depth WRITE so they composite as transparent.
+    glDepthMask(GL_FALSE);
+    draw_pass(true);
+    glDepthMask(GL_TRUE);
     glBindVertexArray(0);
 
     glUniform1i(uloc("uInstanced"), 0);   // restore for grid / other paths

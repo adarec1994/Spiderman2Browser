@@ -32,22 +32,44 @@ static bool plausible_world(float v) {
     return std::isfinite(v) && std::fabs(v) < 100000.f;
 }
 
-// Find a 4x4 row-major float transform matrix in the range [start, start+range).
-// Returns the offset within the buffer, or 0 if not found.
+// Locate the 4x4 row-major world transform inside an instance record.
+//
+// The .dat is a serialized heap image (reflective format), so the matrix does
+// NOT sit at a fixed offset from the 0x7ace5bad marker — it floats (manholes at
+// marker+0xD0, lampposts/trafflites at +0xE0, etc.). Rather than guess an offset,
+// detect the matrix by its STRUCTURE: a genuine rotation+translation has
+//   - bottom-right element == 1.0,
+//   - rows 0..2 form an ORTHONORMAL 3x3 basis (each unit length, mutually
+//     perpendicular).
+// That signature is strong enough to find exactly one match per renderable
+// instance and to naturally REJECT non-mesh logical markers (spawn points,
+// lights, roof-access nodes) which carry no such matrix — so they don't render.
+// Verified across A01/C15/F48: every mesh instance matches, every logical marker
+// does not. Returns the matrix offset, or 0 if none in [start, start+range).
 static size_t find_transform(const uint8_t* d, size_t sz, size_t start, size_t range) {
     size_t end = std::min(start + range, sz);
+    auto dot3 = [](const float* a, const float* b) {
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+    };
     for (size_t off = start; off + 64 <= end; off += 4) {
-        float w = rf(d, off + 60);
-        if (w != 1.0f) continue;
+        if (rf(d, off + 60) != 1.0f) continue;                 // m[3][3] == 1
         float m[16];
         for (int i = 0; i < 16; ++i) m[i] = rf(d, off + i*4);
-        bool ok = true;
-        for (int i = 0; i < 16; ++i) if (!std::isfinite(m[i])) { ok = false; break; }
-        if (!ok) continue;
-        if (std::fabs(m[12]) + std::fabs(m[14]) < 10.f) continue;
-        if (!plausible_world(m[12]) || !plausible_world(m[13]) || !plausible_world(m[14])) continue;
-        float r0 = m[0]*m[0] + m[1]*m[1] + m[2]*m[2];
-        if (r0 < 0.5f || r0 > 2.0f) continue;
+        bool finite = true;
+        for (int i = 0; i < 16; ++i) if (!std::isfinite(m[i])) { finite = false; break; }
+        if (!finite) continue;
+        // rows 0..2 = the 3x3 basis (row r at m[r*4 .. r*4+2])
+        const float* r0 = m + 0; const float* r1 = m + 4; const float* r2 = m + 8;
+        float l0 = dot3(r0, r0), l1 = dot3(r1, r1), l2 = dot3(r2, r2);
+        if (l0 < 0.9f || l0 > 1.1f) continue;                  // each row unit length
+        if (l1 < 0.9f || l1 > 1.1f) continue;
+        if (l2 < 0.9f || l2 > 1.1f) continue;
+        if (std::fabs(dot3(r0, r1)) > 0.05f) continue;         // mutually orthogonal
+        if (std::fabs(dot3(r0, r2)) > 0.05f) continue;
+        if (std::fabs(dot3(r1, r2)) > 0.05f) continue;
+        // translation (row 3) must be a sane world coordinate
+        if (!plausible_world(m[12]) || !plausible_world(m[13]) || !plausible_world(m[14]))
+            continue;
         return off;
     }
     return 0;
@@ -62,26 +84,54 @@ static glm::mat4 rowmaj_to_glm(const float* m) {
     return r;
 }
 
-// Scan a record for a plausible XBX asset name (lowercase, has underscore, no spaces).
+// True for the quality/LOD tag strings that sit beside the asset ref in a record.
+static bool is_quality_tag(const std::string& s) {
+    return s == "SIMPLE" || s == "COMPLEX" || s == "STATIC" ||
+           s == "simple" || s == "complex" || s == "static";
+}
+
+// Scan an instance record's tail for the asset (mesh) reference token.
+//
+// Verified from real .dat data, the asset name appears in one of two casings,
+// always adjacent to the SIMPLE/COMPLEX/STATIC quality tag:
+//   - lowercase with trailing digits, e.g. "s_manholeb000"
+//   - UPPERCASE with no trailing digits, e.g. "S_TRFFLITEA", "S_STRTLAMPB"
+// The previous scanner assumed a fixed [hash:4][name] framing and stepped by 4,
+// which missed the UPPERCASE form (S_TRFFLITEA) → resolution fell through to a
+// fuzzy prefix search that picked the WRONG variant (a/b/c/d). That was the
+// "models use the wrong/LOD-looking mesh" symptom. Here we do a plain ASCII
+// token walk and return the first token that looks like an asset name and is
+// NOT the quality tag.
 static std::string find_asset_name(const uint8_t* d, size_t sz, size_t from, size_t to) {
     to = std::min(to, sz);
-    for (size_t off = from; off + 32 <= to; off += 4) {
-        size_t name_off = off + 4;
-        if (name_off + 4 > to) break;
-        uint8_t c0 = d[name_off];
-        if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'))) continue;
-        std::string s = rstr(d, sz, name_off, 28);
-        if (s.size() < 4) continue;
-        bool valid = true;
-        for (char c : s) if (c == ' ' || c == '/' || c == '\\' || c == '#') { valid = false; break; }
-        if (!valid) continue;
-        if (s.find('_') == std::string::npos && s.find_first_of("0123456789") == std::string::npos) continue;
-        static const char* skip[] = { "SIMPLE", "COMPLEX", "STATIC", nullptr };
-        bool skipped = false;
-        for (int i = 0; skip[i]; ++i) if (s == skip[i]) { skipped = true; break; }
-        if (skipped) continue;
-        return s;
+    std::string cur;
+    auto accept = [&](const std::string& s) -> bool {
+        if (s.size() < 4) return false;
+        if (is_quality_tag(s)) return false;
+        for (char c : s)
+            if (c == ' ' || c == '/' || c == '\\' || c == '#' || c == ':' || c == '.')
+                return false;
+        // must be an identifier: letters/digits/underscore, starting with a letter
+        if (!std::isalpha((unsigned char)s[0])) return false;
+        for (char c : s)
+            if (!(std::isalnum((unsigned char)c) || c == '_')) return false;
+        // asset refs contain an underscore (s_manholeb, sa_awning, a_hydrant) or
+        // trailing digits (blg30x1000); plain words don't.
+        if (s.find('_') == std::string::npos &&
+            s.find_first_of("0123456789") == std::string::npos)
+            return false;
+        return true;
+    };
+    for (size_t off = from; off < to; ++off) {
+        uint8_t c = d[off];
+        if (c >= 32 && c < 127) {
+            cur.push_back((char)c);
+            if (cur.size() > 28) cur.clear();   // names are <=28 chars
+        } else {
+            if (!cur.empty()) { if (accept(cur)) return cur; cur.clear(); }
+        }
     }
+    if (!cur.empty() && accept(cur)) return cur;
     return {};
 }
 
@@ -102,17 +152,26 @@ WorldData* parse_world(const std::string& path) {
         std::string name = rstr(d, sz, rec + 0x10, 32);
         if (name.empty() || !std::isalpha((unsigned char)name[0])) continue;
         { bool ok = true; for (char ch : name) if (!std::isalnum((unsigned char)ch) && ch != '_') { ok=false; break; } if (!ok) continue; }
-        size_t mat_off = find_transform(d, sz, rec + 0xa0, 0x180);
+        // The transform floats between the name and the next marker; scan from just
+        // after the 32-byte name. Window 0x180 covers the observed range
+        // (matrix at marker+0xD0..+0xE0+). No match => a non-mesh logical marker
+        // (spawn point / light / roof-access) — skip it (nothing to render).
+        size_t mat_off = find_transform(d, sz, rec + 0x30, 0x180);
         if (mat_off == 0) continue;
         float m[16];
         for (int k = 0; k < 16; ++k) m[k] = rf(d, mat_off + k*4);
-        std::string asset = find_asset_name(d, sz, rec + 0x10 + 32, rec + 0x300);
+        // Asset ref lives in the tail AFTER the 64-byte matrix (searching across
+        // the matrix risks matching ASCII-looking float bytes). Bound the search
+        // at the next marker if one is closer than 0x300.
+        size_t asset_from = mat_off + 64;
+        size_t asset_to   = std::min(rec + 0x300, sz);
+        std::string asset = find_asset_name(d, sz, asset_from, asset_to);
         WorldInstance inst;
         inst.name       = name;
         inst.asset_name = asset;
         inst.transform  = rowmaj_to_glm(m);
         wd->instances.push_back(std::move(inst));
-        i += 0x100;
+        i += 0x80;   // records are >=~0x150 apart; step modestly to avoid missing any
     }
 
     // ── Post-process: propagate correct asset names across instance chains ────
@@ -196,6 +255,51 @@ WorldData* parse_world(const std::string& path) {
             if (type_idx >= (uint8_t)prop_table_count) continue;
             wd->props.push_back({ (int)type_idx, (float)yaw_raw, x, y, z });
             off += STRIDE - 4;
+        }
+    }
+
+    // ── Building material atlas: S_BLG_BLGMASTER / PEDMASTER / S_BLG_TRM ──────
+    // Building blocks (smlego shader) reference a shared master material; the cell
+    // .dat lists the real wall/edge textures it maps to, each tagged with a "slot"
+    // byte. Layout (verified via IDA + bytes): the master name, then a header with
+    // a u8 entry-count at name_field+0x24, then COUNT entries of FIXED 36-byte
+    // stride: texture-name at entry+0, slot byte = the last non-zero byte of the
+    // 36. (The building's per-face slot bytes live in its instance/placement record
+    // and index this table; for the viewer we expose the whole table so the
+    // renderer can pick a representative wall texture instead of rendering gray.)
+    {
+        static const char* MASTERS[] = { "S_BLG_BLGMASTER", "S_BLG_PEDMASTER", "S_BLG_TRM", nullptr };
+        for (int mi = 0; MASTERS[mi]; ++mi) {
+            const std::string master = MASTERS[mi];
+            // find the master name in the buffer
+            size_t mpos = std::string::npos;
+            for (size_t i = 0; i + master.size() < sz; ++i) {
+                if (d[i] != (uint8_t)master[0]) continue;
+                if (rstr(d, sz, i, master.size() + 1) == master) { mpos = i; break; }
+            }
+            if (mpos == std::string::npos) continue;
+            // entry count is a byte at master_name + 0x24
+            size_t cnt_off = mpos + 0x24;
+            if (cnt_off >= sz) continue;
+            int count = d[cnt_off];
+            if (count <= 0 || count > 64) continue;
+            // entries begin at the first lowercase ASCII run after the header
+            size_t e0 = cnt_off + 1;
+            while (e0 < sz && !(d[e0] >= 'a' && d[e0] <= 'z')) ++e0;
+            const size_t ESTRIDE = 36;
+            std::string master_lc = master;
+            std::transform(master_lc.begin(), master_lc.end(), master_lc.begin(), ::tolower);
+            for (int e = 0; e < count; ++e) {
+                size_t base = e0 + (size_t)e * ESTRIDE;
+                if (base + ESTRIDE > sz) break;
+                std::string tex = rstr(d, sz, base, 28);
+                if (tex.size() < 4 || !(d[base] >= 'a' && d[base] <= 'z')) continue;
+                // slot byte = last non-zero byte within the 36-byte record
+                int slot = 0;
+                for (size_t k = ESTRIDE - 1; k >= 16; --k) { if (d[base + k]) { slot = d[base + k]; break; } }
+                std::transform(tex.begin(), tex.end(), tex.begin(), ::tolower);
+                wd->blg_textures.push_back({ master_lc, slot, tex });
+            }
         }
     }
 
