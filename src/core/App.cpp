@@ -1458,8 +1458,16 @@ void App::run() {
 
         static int s_la = 0;
         if (s_la == 0 && std::getenv("SM2_LOADALL")) { s_la = 1; m_pending_load_all = true; }
-        else if (s_la == 1 && std::getenv("SM2_LOADALL")) { s_la = 2; }
-        else if (s_la == 2 && std::getenv("SM2_LOADALL")) { glfwSetWindowShouldClose(m_window, 1); }
+        else if (s_la == 1 && std::getenv("SM2_LOADALL")) {
+            s_la = 2;
+            if (std::getenv("SM2_PIXDIAG")) {   // street-level view to see missing walls
+                glm::vec3 mn=m_world_bb_min, mx=m_world_bb_max, c=(mn+mx)*0.5f;
+                glm::vec3 eye = glm::vec3(c.x, mn.y + 35.f, c.z);  // low, near centre
+                m_cam.reset_fly(eye);
+                m_cam.yaw = 35.f; m_cam.pitch = 2.f;              // look roughly horizontal
+            }
+        }
+        else if (s_la == 2 && std::getenv("SM2_LOADALL") && !std::getenv("SM2_PIXDIAG")) { glfwSetWindowShouldClose(m_window, 1); }
 
         // ── Fly cam WASD tick ─────────────────────────────────────────────────
         if (m_world_mode && m_cam.fly && !ImGui::GetIO().WantCaptureKeyboard) {
@@ -1542,6 +1550,15 @@ void App::run() {
             m_renderer.draw_scene(m_cam,vp_x(),w,m_h,m_gpu_model,m_gpu_skel);
         }
 
+        static int s_df=-2;
+        if (s_df!=-1 && std::getenv("SM2_PIXDIAG") && (m_world_mode||m_ui_state.has_model)) {
+            if (s_df<0) s_df=60;
+            if (s_df-- == 0){ int W=w,H=m_h,X=vp_x(),DS=1,ow=W/DS,oh=H/DS;
+                std::vector<unsigned char> px((size_t)W*H*3); glReadPixels(X,0,W,H,GL_RGB,GL_UNSIGNED_BYTE,px.data());
+                std::ofstream pp("fb_dump.ppm",std::ios::binary); pp<<"P6\n"<<ow<<" "<<oh<<"\n255\n";
+                for(int yy=oh-1;yy>=0;--yy)for(int xx=0;xx<ow;++xx){size_t s=((size_t)(yy*DS)*W+(xx*DS))*3;pp.put((char)px[s]);pp.put((char)px[s+1]);pp.put((char)px[s+2]);}
+                s_df=-1; }
+        }
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(m_window);
     }
