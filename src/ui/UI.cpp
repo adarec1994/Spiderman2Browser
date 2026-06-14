@@ -15,9 +15,9 @@ static constexpr const char* APP_NAME = "Spiderman 2 Asset Browser";
 static const char* CFG_PATH = "spiderman_2_asset_browser.cfg";
 static const char* LEGACY_CFG_PATH = "xbx_viewer.cfg";
 
-// ── Config (spiderman_2_asset_browser.cfg) ───────────────────────────────────
-// New format: lines of "key=value". Backward compatible with the old single
-// folder-path line.
+
+
+
 void UI::save_config(const std::string& xiso_path, const std::string& folder) {
     std::ofstream o(CFG_PATH);
     if (!o) return;
@@ -37,13 +37,13 @@ void UI::load_config(std::string& xiso_path, std::string& folder) {
     std::string line;
     bool first = true;
     while (std::getline(f, line)) {
-        // strip trailing \r (windows line endings written elsewhere)
+        
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) { first = false; continue; }
 
         auto eq = line.find('=');
         if (eq == std::string::npos) {
-            // legacy: single line == folder path
+            
             if (first) folder = line;
             first = false;
             continue;
@@ -61,14 +61,14 @@ std::string UI::load_folder() {
     std::string x, f; load_config(x, f); return f;
 }
 
-// ── Splash screen ────────────────────────────────────────────────────────────
-// Full-window welcome that prompts for the .xiso (or a folder fallback).
-// Persisted via save_config so future launches auto-load.
+
+
+
 void UI::draw_splash(UIState& state, UICallbacks& cb) {
     float dw = ImGui::GetIO().DisplaySize.x;
     float dh = ImGui::GetIO().DisplaySize.y;
 
-    // Dark full-window backdrop
+    
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({dw, dh});
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.08f, 0.10f, 1.0f));
@@ -77,7 +77,7 @@ void UI::draw_splash(UIState& state, UICallbacks& cb) {
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
 
-    // Just the button, centered on the dark background.
+    
     const float btn_w = std::min(360.f, dw * 0.6f);
     const float btn_h = 40.f;
     ImGui::SetCursorPos({(dw - btn_w) * 0.5f, (dh - btn_h) * 0.5f});
@@ -99,7 +99,7 @@ void UI::draw_splash(UIState& state, UICallbacks& cb) {
     ImGui::End();
     ImGui::PopStyleColor();
 
-    // ── File dialog ─────────────────────────────────────────────────────────
+    
     float fdw = std::min(720.f, dw * 0.8f);
     float fdh = std::min(480.f, dh * 0.75f);
 
@@ -114,7 +114,7 @@ void UI::draw_splash(UIState& state, UICallbacks& cb) {
     }
 }
 
-// ── Main draw ────────────────────────────────────────────────────────────────
+
 void UI::draw(UIState& state, UICallbacks& cb,
               bool& wireframe, bool& show_grid, bool& show_skel, bool& show_uv,
               int) {
@@ -123,39 +123,39 @@ void UI::draw(UIState& state, UICallbacks& cb,
     float dw = ImGui::GetIO().DisplaySize.x;
     const bool show_anim_panel = state.has_model && !state.anim_names.empty();
 
-    // Splash takes over the whole window
+    
     if (state.show_splash) { draw_splash(state, cb); return; }
 
     float line = ImGui::GetTextLineHeightWithSpacing();
     float sy   = ImGui::GetStyle().ItemSpacing.y;
     float fpy  = ImGui::GetStyle().FramePadding.y;
 
-    // ── Single left panel, split vertically into BeginChild sections ─────────
+    
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({(float)PANEL_W, dh});
     ImGui::Begin("##panel", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove    | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    // ── Header ──────────────────────────────────────────────────────────────
+    
     ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "%s", APP_NAME);
     ImGui::Separator();
 
-    // ── Compute heights for stacked sections ────────────────────────────────
-    // Options block: 2 checkbox rows + 1 button row
+    
+    
     const float opts_h = line * 2.f + fpy * 4 + sy * 3 + 32.f;
-    // Submesh block: only when a model is loaded
+    
     const bool show_sm = state.has_model && !state.submeshes.empty();
     float sm_h  = show_sm ? std::clamp(dh * 0.28f, 120.f, 260.f) : 0.f;
-    // Tabs block: remaining space
+    
     float used  = opts_h + (show_sm ? sm_h + sy * 2 + 6.f : 0.f) + sy * 2 + 6.f;
     float tabs_h = std::max(120.f, ImGui::GetContentRegionAvail().y - used);
 
-    // ── Tabs (Models / World) ───────────────────────────────────────────────
+    
     ImGui::BeginChild("##tabs_section", {0, tabs_h}, false);
     if (ImGui::BeginTabBar("##tabs")) {
 
-        // ── Models tab ───────────────────────────────────────────────────
+        
         if (ImGui::BeginTabItem("Models")) {
             static char search[128] = {};
             ImGui::SetNextItemWidth(-1);
@@ -191,7 +191,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
             ImGui::EndTabItem();
         }
 
-        // ── World tab ────────────────────────────────────────────────────
+        
         if (ImGui::BeginTabItem("World")) {
             int n_world = (int)state.world_files.size();
 
@@ -250,7 +250,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
     }
     ImGui::EndChild();
 
-    // ── Submesh section (when model is loaded) ──────────────────────────────
+    
     if (show_sm) {
         ImGui::Separator();
         ImGui::BeginChild("##submesh_section", {0, sm_h}, false);
@@ -274,7 +274,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGui::EndChild();
     }
 
-    // ── Bottom: render options ──────────────────────────────────────────────
+    
     ImGui::Separator();
     ImGui::BeginChild("##opts_section", {0, 0}, false);
     ImGui::Checkbox("Wireframe", &wireframe);
@@ -295,7 +295,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
     if (state.mat_editor_open)
         draw_mat_editor(state, cb);
 
-    // ── Floating texture preview ────────────────────────────────────────────
+    
     if (state.show_tex_preview && state.preview_tex_id) {
         ImGui::SetNextWindowSize({300.f, 340.f}, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos({dw * 0.5f - 150.f, dh * 0.5f - 170.f}, ImGuiCond_FirstUseEver);
@@ -308,7 +308,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGui::End();
     }
 
-    // ── Right panel: animation list ─────────────────────────────────────────
+    
     if (show_anim_panel) {
         ImGui::SetNextWindowPos({dw - ANIM_W, 0});
         ImGui::SetNextWindowSize({(float)ANIM_W, dh});
@@ -372,7 +372,7 @@ void UI::draw(UIState& state, UICallbacks& cb,
         ImGui::End();
     }
 }
-// ── Material Editor ───────────────────────────────────────────────────────────
+
 void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
     if (state.sel_submesh < 0 || state.sel_submesh >= (int)state.submeshes.size()) {
         state.mat_editor_open = false;
@@ -395,7 +395,7 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
     float canvas_w  = total_w - browser_w - 8.f;
     float canvas_h  = ImGui::GetContentRegionAvail().y;
 
-    // ── Left: node canvas ─────────────────────────────────────────────────────
+    
     ImGui::BeginChild("##matcanvas", {canvas_w, canvas_h}, true,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -403,14 +403,14 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
     ImVec2      orig = ImGui::GetWindowPos();
     ImVec2      csz  = ImGui::GetWindowSize();
 
-    // Dark grid background
+    
     ImU32 bg    = IM_COL32(28,28,32,255);
     ImU32 gridC = IM_COL32(45,45,52,255);
     dl->AddRectFilled(orig, {orig.x+csz.x, orig.y+csz.y}, bg);
     for (float x = orig.x; x < orig.x+csz.x; x += 32) dl->AddLine({x, orig.y}, {x, orig.y+csz.y}, gridC);
     for (float y = orig.y; y < orig.y+csz.y; y += 32) dl->AddLine({orig.x, y}, {orig.x+csz.x, y}, gridC);
 
-    // ── Shader node ──────────────────────────────────────────────────────────
+    
     const float NW = 180.f, NH = 90.f, ROUNDING = 6.f;
     ImVec2 shader_pos = {orig.x + 40.f, orig.y + canvas_h*0.5f - NH*0.5f};
     ImU32 shader_hdr  = IM_COL32(55,100,60,255);
@@ -424,13 +424,13 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
     const char* sh_label = sm.shader_type.empty() ? "(none)" : sm.shader_type.c_str();
     dl->AddText({shader_pos.x+8, shader_pos.y+32}, IM_COL32(180,220,180,255), sh_label);
     dl->AddText({shader_pos.x+8, shader_pos.y+50}, IM_COL32(130,150,130,255), sm.mat_name.c_str());
-    // output socket
+    
     ImVec2 out_sock = {shader_pos.x+NW, shader_pos.y+NH*0.5f};
     dl->AddCircleFilled(out_sock, 5.f, IM_COL32(120,200,120,255));
 
-    // ── Texture node ─────────────────────────────────────────────────────────
+    
     const float TNW = 180.f, TNH = 160.f;
-    const float PREV = 96.f; // preview size
+    const float PREV = 96.f; 
     ImVec2 tex_pos = {orig.x + canvas_w - TNW - 40.f, orig.y + canvas_h*0.5f - TNH*0.5f};
     ImU32 tex_hdr  = IM_COL32(55,70,110,255);
     ImU32 tex_body = IM_COL32(35,40,60,255);
@@ -441,26 +441,26 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
     dl->AddRect(tex_pos, {tex_pos.x+TNW, tex_pos.y+TNH}, tex_bdr, ROUNDING);
     dl->AddText({tex_pos.x+8, tex_pos.y+6}, IM_COL32(160,180,255,255), "Texture");
 
-    // input socket
+    
     ImVec2 in_sock = {tex_pos.x, tex_pos.y+TNH*0.5f};
     dl->AddCircleFilled(in_sock, 5.f, IM_COL32(100,140,220,255));
 
-    // Bezier curve between shader out → texture in
+    
     ImVec2 cp1 = {out_sock.x + 60.f, out_sock.y};
     ImVec2 cp2 = {in_sock.x  - 60.f, in_sock.y};
     dl->AddBezierCubic(out_sock, cp1, cp2, in_sock, IM_COL32(120,180,120,180), 2.f);
 
-    // Texture preview inside node — drawn via ImGui::SetCursorScreenPos after clip
+    
     ImVec2 prev_tl = {tex_pos.x + (TNW-PREV)*0.5f, tex_pos.y + 32.f};
     std::string cur_tex = (sm.tex_sel >= 0 && sm.tex_sel < (int)sm.tex_candidates.size())
                           ? sm.tex_candidates[sm.tex_sel] : "";
     if (!cur_tex.empty()) {
-        // find in all_tex_entries
+        
         unsigned int tid = 0;
         for (auto& e : state.all_tex_entries)
             if (e.first == cur_tex) { tid = (unsigned int)ImGui::GetID(e.second.c_str()); break; }
-        // Use a placeholder colour if not loaded; the actual tex_id is in gpu meshes
-        // We show a labelled placeholder rect here
+        
+        
         dl->AddRectFilled(prev_tl, {prev_tl.x+PREV, prev_tl.y+PREV}, IM_COL32(50,50,80,255));
         dl->AddRect(prev_tl, {prev_tl.x+PREV, prev_tl.y+PREV}, IM_COL32(80,100,180,200));
         dl->AddText({prev_tl.x+4, prev_tl.y+PREV*0.5f-7.f}, IM_COL32(160,170,220,255), cur_tex.c_str());
@@ -468,13 +468,13 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
         dl->AddRectFilled(prev_tl, {prev_tl.x+PREV, prev_tl.y+PREV}, IM_COL32(40,40,40,200));
         dl->AddText({prev_tl.x+8, prev_tl.y+PREV*0.5f-7.f}, IM_COL32(100,100,100,255), "(no texture)");
     }
-    // tex name below preview
+    
     dl->AddText({tex_pos.x+8, prev_tl.y+PREV+4.f},
         IM_COL32(160,170,220,200), cur_tex.empty() ? "" : cur_tex.c_str());
 
     ImGui::EndChild();
 
-    // ── Right: texture browser ────────────────────────────────────────────────
+    
     ImGui::SameLine();
     ImGui::BeginChild("##texbrowser", {browser_w, canvas_h}, true);
 
@@ -488,14 +488,14 @@ void UI::draw_mat_editor(UIState& state, UICallbacks& cb) {
 
     const float THUMB = 48.f;
     for (auto& [stem, path] : state.all_tex_entries) {
-        // filter
+        
         if (!filter_lo.empty()) {
             std::string sl = stem;
             std::transform(sl.begin(), sl.end(), sl.begin(), ::tolower);
             if (sl.find(filter_lo) == std::string::npos) continue;
         }
 
-        // load texture lazily
+        
         extern unsigned int load_texture(const std::string&);
         unsigned int tid = load_texture(path);
 

@@ -7,7 +7,7 @@
 #include <filesystem>
 
 static std::vector<uint8_t> read_file(const std::string& path) {
-    return vfs::read_file(path);   // serves from a mounted .iso or the real FS
+    return vfs::read_file(path);   
 }
 
 template<typename T>
@@ -15,10 +15,10 @@ static T rd(const uint8_t* p, size_t off) {
     T v; memcpy(&v, p + off, sizeof(T)); return v;
 }
 
-// Count non-overlapping occurrences of an ASCII needle in a byte blob.
-// Used to read the skeleton's animation source-descriptor list, which names
-// exactly one "nal_quaternion" per animated rotation track — the authoritative
-// quaternion-track count (bone_count-1 over-counts by the trailing fakeroot).
+
+
+
+
 static int count_substr(const uint8_t* d, size_t sz, const char* needle) {
     size_t nlen = strlen(needle);
     if (nlen == 0 || sz < nlen) return 0;
@@ -30,10 +30,10 @@ static int count_substr(const uint8_t* d, size_t sz, const char* needle) {
     return n;
 }
 
-// Black Cat pose sources are laid out like the game skeleton source table:
-// source 0 is ae_base_bone (a position/orientation source for bip01 pelvis),
-// sources 1..59 are nal_quaternion tracks for bones 1..59, source 60 is
-// AE_Floor_Offset, and source 61 is NAL_TRAJECTORY/fakeroot.
+
+
+
+
 static constexpr int BC_QUAT_TRACK_COUNT = 59;
 static const float BC_QUAT_SCALE[BC_QUAT_TRACK_COUNT] = {
     0.00100000f, 0.00100000f, 0.00100000f, 0.00100000f,
@@ -52,17 +52,17 @@ static const float BC_QUAT_SCALE[BC_QUAT_TRACK_COUNT] = {
     0.00195312f, 0.00195312f, 0.00195312f, 0.00100000f,
     0.00195312f, 0.00195312f, 0.00195312f,
 };
-// Source 0 (ae_base_bone) is a position/orientation source. The local
-// translation table ends at BLACK_CAT.dat + 0x2ae0; source scales start at
-// 0x2ae4. IDA's NAL position/orient writer uses scale[0] for XYZ translation
-// and scale[1] for orientation.
+
+
+
+
 static constexpr float BC_ROOT_POSITION_SOURCE_SCALE = 0.00100000f;
 static constexpr float BC_ROOT_Q_SCALE = 0.00100000f;
 
-// BC clips seen so far carry eight active nal_position triples after signals.
-// These begin at source id 68, with source metadata targeting bones 1..59.
-// These are left disabled until the packed float3 metadata path is fully
-// modeled from IDA; applying them as plain local translations is wrong.
+
+
+
+
 static const int BC_POSITION_BONES[] = {
     1, 2, 3, 4, 5, 6, 7, 8
 };
@@ -79,16 +79,16 @@ glm::mat4 BonePose::to_matrix() const { return glm::mat4_cast(q); }
 
 static glm::quat game_quat_to_glm(const glm::quat& q);
 
-// ============================================================
-// Skeleton-format locators (work for any character, not just Black Cat)
-// ============================================================
-// The skeleton .dat is a named-chunk container; the rest-pose quats and the
-// per-source scale table sit at per-character offsets. Find them by structure.
 
-// First run of >= want consecutive unit quaternions = the rest-pose table.
+
+
+
+
+
+
 static size_t find_rest_quat_run(const uint8_t* d, size_t sz, int want) {
     if (want < 1) return 0;
-    if (want > 8) want = 8;            // 8 is plenty to lock onto the table
+    if (want > 8) want = 8;            
     for (size_t o = 0x40; o + 16 * (size_t)want <= sz; o += 4) {
         int ok = 0;
         for (int k = 0; k < want; ++k) {
@@ -101,7 +101,7 @@ static size_t find_rest_quat_run(const uint8_t* d, size_t sz, int want) {
     return 0;
 }
 
-// Longest run of small positive floats (source scales, ~1/1000..1/4) = scale table.
+
 static size_t find_scale_table(const uint8_t* d, size_t sz, int& out_len) {
     size_t best_off = 0; int best_len = 0;
     for (size_t o = 0x100; o + 4 <= sz; o += 4) {
@@ -111,7 +111,7 @@ static size_t find_scale_table(const uint8_t* d, size_t sz, int& out_len) {
             if (v >= 0.0001f && v <= 0.25f) n++; else break;
         }
         if (n > best_len) { best_len = n; best_off = o; }
-        if (n > 1) o += (size_t)(n - 1) * 4;   // keep it linear
+        if (n > 1) o += (size_t)(n - 1) * 4;   
     }
     out_len = best_len;
     return best_off;
@@ -126,8 +126,8 @@ SkeletonAnimMeta load_skeleton_meta(const std::string& skel_path, int bone_count
     size_t sz = data.size();
     meta.bone_count = bone_count;
 
-    // Rest pose: root (bone 0) is an identity placeholder (ae_base_bone); bones
-    // 1..N-1 come from the rest-quat run.
+    
+    
     meta.rest_pose.assign(bone_count, glm::quat(1, 0, 0, 0));
     size_t rq = find_rest_quat_run(d, sz, bone_count - 1);
     if (rq) {
@@ -143,7 +143,7 @@ SkeletonAnimMeta load_skeleton_meta(const std::string& skel_path, int bone_count
         }
     }
 
-    // Scale table: [root_pos, root_orient, quat_0 .. quat_(N-2), extras].
+    
     int slen = 0;
     size_t so = find_scale_table(d, sz, slen);
     meta.quat_scales.assign(bone_count - 1, 0.001f);
@@ -154,20 +154,20 @@ SkeletonAnimMeta load_skeleton_meta(const std::string& skel_path, int bone_count
             meta.quat_scales[i] = rd<float>(d, so + (size_t)(2 + i) * 4);
     }
 
-    // Authoritative quaternion-track count: one "nal_quaternion" source per
-    // animated rotation track in the skeleton's source-descriptor list. This is
-    // the real count; bone_count-1 over-counts by the trailing fakeroot (e.g.
-    // MINION_LIZARD: 44 nal_quaternion vs bone_count-1 = 45), making the decoder
-    // read one packet too many and desync the stream tail. 0 = not found.
+    
+    
+    
+    
+    
     meta.quat_track_count = count_substr(d, sz, "nal_quaternion");
 
     meta.valid = (rq != 0);
     return meta;
 }
 
-// ============================================================
-// BitReader
-// ============================================================
+
+
+
 struct BitReader {
     const uint8_t* data; size_t len, bp; int bi;
     BitReader(const uint8_t* d, size_t n, size_t bo = 0, int bio = 0)
@@ -183,9 +183,9 @@ struct BitReader {
 static inline int32_t sar(int32_t v, int s) { return v >> s; }
 static void dec_zeros(int32_t* o, int n) { for (int i = 0; i < n; i++) o[i] = 0; }
 
-// ============================================================
-// Entropy codecs (all 62 functions)
-// ============================================================
+
+
+
 static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
     int32_t b, v, low2, low3;
     switch (codec) {
@@ -319,10 +319,10 @@ static int dec_one(BitReader& br, int rem, int codec, int32_t* out) {
 }
 
 static void decode_channel(BitReader& br, int n, int codec, int32_t* out) {
-    // IDA funcs_32BF4F dispatch:
-    //   0,30,31,62,63 -> zero fill
-    //   32..46        -> duplicate of 0..14 for negative-scale channels
-    //   47..61        -> wide-value implementations kept here as cases 45..59
+    
+    
+    
+    
     if (codec == 0 || codec == 30 || codec == 31 || codec >= 62) {
         dec_zeros(out, n);
         return;
@@ -488,19 +488,19 @@ static std::vector<glm::quat> decode_entropy_quat_packet(const std::vector<uint8
     glm::quat cur = st.q;
     out[0] = packed_output ? unpack_packed_quat3(cur) : cur;
 
-    // Seed-only / constant track. Packets too short to carry per-frame entropy
-    // delta channels (the 4-byte tracks — e.g. ARMORED_THUG hit-reaction
-    // r-forearm/hand/finger, bytes "00 00 20 04") are constant: the bone holds
-    // one local orientation for the whole clip. Verified via IDA
-    // (NAL_WritePackedQuaternionTrack_DeltaAccum @0x332f70): the warm-up flags at
-    // state+0x15 make the writer emit the SEED before entropy-delta accumulation
-    // begins, and a seed-only source never reaches the accumulate loop. Running
-    // the second-order integrator below on such a packet re-applies the seed
-    // velocity every frame and spins the bone away (model collapse); skipping the
-    // packet drops the seed and freezes the bone at rest (arms in wrong pose).
-    // Correct behavior: hold the decoded seed for all frames. Threshold <5 so it
-    // touches ONLY the 4-byte constants — every working track (>=6 bytes,
-    // including the 6-byte rest-seed clavicles) decodes exactly as before.
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     if ((int)packet.size() < 5) {
         for (int f = 1; f < frame_count; ++f) out[f] = out[0];
         return out;
@@ -603,16 +603,16 @@ static std::vector<float> decode_entropy_float_packet(const std::vector<uint8_t>
     return out;
 }
 
-// ============================================================
-// Decode all frames from NAL entropy quaternion packets.
-// ============================================================
+
+
+
 void AnimClip::decode_all_frames() const {
     if (frames_decoded) return;
     frames_decoded = true;
     cached_frames.assign(frame_count, std::vector<BonePose>(n_bones));
     cached_root_orientations.assign(frame_count, glm::quat(1, 0, 0, 0));
 
-    // Fill skeleton tracks with rest pose until a packet overrides them.
+    
     for (int f = 0; f < frame_count; f++)
         for (int bi = 0; bi < n_bones; bi++) {
             if (bi < (int)rest_pose.size())
@@ -664,20 +664,20 @@ void AnimClip::decode_all_frames() const {
         for (int qi = 0; qi < nq; qi++) {
             int bone = sec.quat_bones[qi];
             if (bone < 0 || bone >= n_bones) continue;
-            // Skip ONLY truly-empty (0-byte) tracks: those carry no data, so
-            // decoding them yields identity and would OVERWRITE the bone's rest
-            // pose with identity (this is what exploded the legs). Non-empty short
-            // packets are seed-only constants and are handled inside
-            // decode_entropy_quat_packet (it holds the seed instead of
-            // integrating) — see the note there. Verified via IDA.
+            
+            
+            
+            
+            
+            
             if (nf >= 2 && sec.quat_packets[qi].empty()) continue;
             float track_scale = (qi < (int)sec.quat_scales.size()) ? sec.quat_scales[qi] : 0.001f;
-            // packed_output=false: decode at full float precision. The game packs
-            // these to 3 signed bytes (~1/127 ~= 0.8deg steps) for storage, but for
-            // the viewer that quantization stair-steps slow motion (idle sway lands
-            // one byte-level per frame) and reads as jitter under interpolation.
-            // The entropy delta stream is finer than the byte-pack, so decoding
-            // unpacked is smoother and within <1deg of the game's reconstruction.
+            
+            
+            
+            
+            
+            
             auto decoded = decode_entropy_quat_packet(sec.quat_packets[qi], nf, track_scale * qscale, false);
 
             for (int f = 0; f < nf && f < (int)decoded.size(); f++) {
@@ -790,9 +790,9 @@ glm::quat AnimClip::sample_root_orientation(float t) const {
     return normalized_or_identity(glm::slerp(a, b, alpha));
 }
 
-// ============================================================
-// File parsing
-// ============================================================
+
+
+
 void parse_animation(AnimClip& clip, const SkeletonAnimMeta& meta) {
     auto data = read_file(clip.path);
     if (data.size() < 0x120) { clip.loaded = false; return; }
@@ -868,19 +868,19 @@ void parse_animation(AnimClip& clip, const SkeletonAnimMeta& meta) {
             return true;
         };
 
-        // BC stream order: source 0 ae_base_bone PO for bip01 pelvis, then
-        // 59 nal_quaternion packets whose source ids target bones 1..59.
+        
+        
         for (int axis = 0; axis < 3; ++axis)
             read_packet(sec.root_pos_packets[axis]);
         read_packet(sec.root_quat_packet);
 
-        // Quaternion-track count: the skeleton's source-descriptor list names
-        // exactly one "nal_quaternion" per animated rotation track, so that count
-        // is authoritative. The old bone_count-1 over-counts by the trailing
-        // fakeroot (e.g. MINION_LIZARD: 44 sources vs bone_count-1 = 45), which
-        // read one packet too many and desynced the stream tail. Fall back to
-        // bone_count-1 / BC default only when the source list isn't found.
-        // (Black Cat is 59 either way, so working rigs are unaffected.)
+        
+        
+        
+        
+        
+        
+        
         int q_track_count = (meta.quat_track_count > 0)
                           ? meta.quat_track_count
                           : ((meta.valid && meta.bone_count > 1)
@@ -893,13 +893,19 @@ void parse_animation(AnimClip& clip, const SkeletonAnimMeta& meta) {
             float s = (meta.valid && qi < (int)meta.quat_scales.size())
                     ? meta.quat_scales[qi]
                     : (qi < BC_QUAT_TRACK_COUNT ? BC_QUAT_SCALE[qi] : 0.001f);
+            if (meta.quat_effective_scale_cap > 0.0f &&
+                clip.qscale != 0.0f) {
+                float effective = s * clip.qscale;
+                if (effective > meta.quat_effective_scale_cap)
+                    s = meta.quat_effective_scale_cap / clip.qscale;
+            }
             sec.quat_scales.push_back(s);
         }
 
-        // The remaining BC sources are ae_floor_offset, nal_trajectory,
-        // spidey_signal, then nal_position triples. Keep the cursor faithful
-        // to the game source descriptors, but do not apply position tracks
-        // until their per-axis skeleton metadata is fully modeled.
+        
+        
+        
+        
         read_packet(sec.floor_packet);
         for (int ti = 0; ti < 4; ++ti)
             read_packet(sec.trajectory_packets[ti]);
@@ -958,10 +964,10 @@ std::vector<AnimClip> scan_animations(const std::string& folder) {
         if (ext != ".dat") continue;
         if (stem.empty()) continue;
 
-        // Any .dat with the NAL animation magic is a clip, regardless of name.
-        // Skeleton .dat use magic 0x00B5B58C and mesh/data .dat use 0x7BAD*, so
-        // the magic check alone separates animations from everything else.
-        // Read the header through the VFS (serves from a mounted .iso or real FS).
+        
+        
+        
+        
         std::vector<uint8_t> hdr = vfs::read_file(path);
         if (hdr.size() < 0xB8) continue;
         if (rd<uint32_t>(hdr.data(), 0) != 0x00010101) continue;

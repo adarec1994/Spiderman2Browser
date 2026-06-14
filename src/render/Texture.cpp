@@ -15,9 +15,8 @@
 namespace fs = std::filesystem;
 
 static std::unordered_map<std::string, unsigned int> g_cache;
-std::string g_diag_last_tex_path;  // diagnostic: path of last resolved texture
 
-// ── DDS loader ────────────────────────────────────────────
+
 struct DDSPixelFormat {
     uint32_t size, flags, fourCC, rgbBitCount;
     uint32_t rMask, gMask, bMask, aMask;
@@ -31,34 +30,34 @@ struct DDSHeader {
 };
 
 static unsigned int load_dds(const std::string& path) {
-    // Read through the VFS so a mounted .iso is served transparently.
+    
     std::vector<uint8_t> file = vfs::read_file(path);
     if (file.size() < 4 + sizeof(DDSHeader)) return 0;
     const uint8_t* fp = file.data();
     size_t fpos = 0;
 
     uint32_t magic; std::memcpy(&magic, fp, 4); fpos = 4;
-    if (magic != 0x20534444) return 0; // "DDS "
+    if (magic != 0x20534444) return 0; 
 
     DDSHeader hdr;
     std::memcpy(&hdr, fp + fpos, sizeof(hdr)); fpos += sizeof(hdr);
 
     uint32_t w = hdr.width, h = hdr.height;
-    uint32_t file_mips = hdr.mipMapCount;          // 0 = none; may be a PARTIAL chain
+    uint32_t file_mips = hdr.mipMapCount;          
     uint32_t mips = std::max(1u, file_mips);
 
-    // Determine format
+    
     uint32_t gl_fmt = 0;
     uint32_t block  = 16;
     char cc[5] = {};
     memcpy(cc, &hdr.pf.fourCC, 4);
 
-    if      (memcmp(cc,"DXT1",4)==0) { gl_fmt = 0x83F1; block = 8; }  // GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
-    else if (memcmp(cc,"DXT3",4)==0) { gl_fmt = 0x83F2; }             // GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
-    else if (memcmp(cc,"DXT5",4)==0) { gl_fmt = 0x83F3; }             // GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+    if      (memcmp(cc,"DXT1",4)==0) { gl_fmt = 0x83F1; block = 8; }  
+    else if (memcmp(cc,"DXT3",4)==0) { gl_fmt = 0x83F2; }             
+    else if (memcmp(cc,"DXT5",4)==0) { gl_fmt = 0x83F3; }             
     else return 0;
 
-    // Read all mip data
+    
     size_t data_size = 0;
     uint32_t ww=w, hh=h;
     for (uint32_t m=0; m<mips; ++m) {
@@ -66,7 +65,7 @@ static unsigned int load_dds(const std::string& path) {
         ww=std::max(1u,ww/2); hh=std::max(1u,hh/2);
     }
     std::vector<uint8_t> pixels(data_size);
-    if (fpos + data_size > file.size()) data_size = file.size() - fpos; // clamp to available
+    if (fpos + data_size > file.size()) data_size = file.size() - fpos; 
     std::memcpy(pixels.data(), fp + fpos, data_size);
 
     unsigned int tid;
@@ -85,13 +84,13 @@ static unsigned int load_dds(const std::string& path) {
         offset += sz;
         ww=std::max(1u,ww/2); hh=std::max(1u,hh/2);
     }
-    // Mip-chain completeness. Many SM2 DDS ship a PARTIAL chain that stops before
-    // 1x1 (e.g. 128x256 with mipMapCount=8 ends at 1x2; a full chain needs 9).
-    // OpenGL's default GL_TEXTURE_MAX_LEVEL is 1000, so it treats such a texture
-    // as mipmap-INCOMPLETE and samples it as solid BLACK when minified — which is
-    // exactly why tall/distant buildings (ESB, cranes, plaza floors…) rendered
-    // black. Cap MAX_LEVEL to the levels we actually uploaded so GL considers the
-    // texture complete. When the file has 0/1 mips, generate a full chain instead.
+    
+    
+    
+    
+    
+    
+    
     if (file_mips <= 1) {
         glGenerateMipmap(GL_TEXTURE_2D);
     } else {
@@ -101,7 +100,7 @@ static unsigned int load_dds(const std::string& path) {
     return tid;
 }
 
-// ── stb fallback ──────────────────────────────────────────
+
 static unsigned int load_stb(const std::string& path) {
     int w, h, ch;
     unsigned char* data = stbi_load(path.c_str(), &w, &h, &ch, 4);
@@ -135,30 +134,30 @@ unsigned int load_texture(const std::string& path) {
     return tid;
 }
 
-// ── Global texture registry ───────────────────────────────
-// Built once by build_tex_registry(root_dir). Maps lowercase stem (no ext)
-// and lowercase filename → absolute path. Used as fallback when local search fails.
+
+
+
 static std::unordered_map<std::string, std::string> g_registry;
-static std::vector<std::string>                     g_stems_sorted; // for prefix matching
+static std::vector<std::string>                     g_stems_sorted; 
 
 void build_tex_registry(const std::string& root_dir) {
     g_registry.clear();
     g_stems_sorted.clear();
-    // Enumerate once via the VFS so a mounted .iso is served transparently.
+    
     std::vector<std::string> all = vfs::walk_files(root_dir);
-    // ── Pass 1: index all loadable image files ────────────────────────────────
+    
     for (auto& fpath : all) {
         std::string fn  = fs::path(fpath).filename().string();
         std::string fnl = fn;
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
-        // Only index loadable image files — never .dat, .xbx, etc.
+        
         std::string ext2 = fs::path(fnl).extension().string();
         if (ext2 != ".dds" && ext2 != ".tga" && ext2 != ".bmp" &&
             ext2 != ".png" && ext2 != ".jpg" && ext2 != ".jpeg") continue;
-        // store by full lowercase filename
+        
         if (g_registry.find(fnl) == g_registry.end())
             g_registry[fnl] = fpath;
-        // also store by stem (no extension) for stemmed lookups
+        
         std::string stem = fs::path(fnl).stem().string();
         if (g_registry.find(stem) == g_registry.end()) {
             g_registry[stem] = fpath;
@@ -166,55 +165,55 @@ void build_tex_registry(const std::string& root_dir) {
         }
     }
 
-    // ── Pass 2: resolve IFL references (.sg_ / .sd_ / .s_b / .s_t manifests) ──
-    // IFL (Image File List) files are tiny text files mapping an _ifl texture
-    // name to the real texture filename(s). The model's material references the
-    // IFL stem (e.g. "sd_blg_strwal_com_ifl"); the manifest's FIRST line is the
-    // texture to use.  e.g. SD_BLG_STRWAL_COM_IFL.sd_ contains
-    // "sd_blg_strwal01.tga" → resolves to SD_BLG_STRWAL01.dds.
-    // The SAME format ships under several extensions across the city packs:
-    //   .sg_  (CITY_STRIP shared), .sd_ (CITY\CITY_STRIP_* colocated).
-    // (.s_b/.s_t building masters are multi-line and handled in Pass 3.)
-    // (Missing the .sd_ extension was why store/mall/building models in
-    // CITY\CITY_STRIP_* rendered untextured — their walls/windows/awnings are
-    // ALL referenced through _ifl manifests, never as direct texture names.)
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     for (auto& fpath : all) {
         std::string fnl = fs::path(fpath).filename().string();
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
         std::string ext2 = fs::path(fnl).extension().string();
         if (ext2 != ".sg_" && ext2 != ".sd_") continue;
 
-        // IFL stem: e.g. "sg_alleywall_ifl"
+        
         std::string ifl_stem = fs::path(fnl).stem().string();
-        if (g_registry.count(ifl_stem)) continue; // already mapped
+        if (g_registry.count(ifl_stem)) continue; 
 
-        // Read the file (typically < 40 bytes) through the VFS.
+        
         std::vector<uint8_t> ifl_data = vfs::read_file(fpath);
         if (ifl_data.empty()) continue;
         std::string line(reinterpret_cast<const char*>(ifl_data.data()), ifl_data.size());
-        // Keep only the first line.
+        
         size_t nl = line.find_first_of("\r\n");
         if (nl != std::string::npos) line.resize(nl);
-        // Trim trailing whitespace.
+        
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
             line.pop_back();
         if (line.empty()) continue;
 
-        // Lowercase and strip image extension to get the referenced stem
+        
         std::transform(line.begin(), line.end(), line.begin(), ::tolower);
         std::string ref_stem = fs::path(line).stem().string();
         if (ref_stem.empty()) continue;
 
-        // Resolve through the registry (the DDS was already indexed in pass 1)
+        
         auto it = g_registry.find(ref_stem);
         if (it != g_registry.end()) {
             g_registry[ifl_stem] = it->second;
             g_stems_sorted.push_back(ifl_stem);
 
-            // Also register the base name (without "_ifl") as an alias.
-            // XBX materials reference "s_str_bas1" but the DDS is only reachable
-            // through the IFL file "s_str_bas1_ifl.sg_".  This bidirectional
-            // mapping lets direct lookups resolve without prefix scanning.
+            
+            
+            
+            
             static const std::string IFL_SUFFIX = "_ifl";
             if (ifl_stem.size() > IFL_SUFFIX.size() &&
                 ifl_stem.substr(ifl_stem.size() - IFL_SUFFIX.size()) == IFL_SUFFIX) {
@@ -227,39 +226,39 @@ void build_tex_registry(const std::string& root_dir) {
         }
     }
 
-    // ── Pass 3: resolve building/multi-texture manifests (.s_b / .s_t) ───────
-    // Building-block models (shader "smlego") reference a single "master"
-    // material name, e.g. "s_blg_blgmaster", whose real faces live in a text
-    // manifest GAME\CITY\S_BLG_BLGMASTER.s_b — a CRLF-separated list of the
-    // actual face textures:
-    //     s_blg_01sid1_com.tga
-    //     s_blg_04sid1_com.tga
-    //     ...
-    // The faces themselves (S_BLG_01SID1_COM.dds, …) are indexed in pass 1, but
-    // "s_blg_blgmaster" resolves to nothing → buildings render untextured (gray).
-    // Alias the manifest stem to its FIRST resolvable listed texture so the
-    // building gets a representative facade texture. (Full per-face/atlas mapping
-    // would need the model's UV regions; first-face is the pragmatic fix.)
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     for (auto& fpath : all) {
         std::string fnl = fs::path(fpath).filename().string();
         std::transform(fnl.begin(), fnl.end(), fnl.begin(), ::tolower);
         std::string ext2 = fs::path(fnl).extension().string();
         if (ext2 != ".s_b" && ext2 != ".s_t") continue;
 
-        std::string man_stem = fs::path(fnl).stem().string();   // e.g. "s_blg_blgmaster"
+        std::string man_stem = fs::path(fnl).stem().string();   
         if (g_registry.count(man_stem)) continue;
 
         std::vector<uint8_t> data = vfs::read_file(fpath);
         if (data.empty()) continue;
         std::string text(reinterpret_cast<const char*>(data.data()), data.size());
 
-        // Walk lines; alias the manifest to the first listed texture that exists.
+        
         size_t pos = 0;
         while (pos < text.size()) {
             size_t nl = text.find_first_of("\r\n", pos);
             std::string line = text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
             pos = (nl == std::string::npos) ? text.size() : nl + 1;
-            // trim
+            
             while (!line.empty() && (line.back()==' '||line.back()=='\t'||line.back()=='\r'||line.back()=='\n'))
                 line.pop_back();
             if (line.empty()) continue;
@@ -270,7 +269,7 @@ void build_tex_registry(const std::string& root_dir) {
             if (it != g_registry.end()) {
                 g_registry[man_stem] = it->second;
                 g_stems_sorted.push_back(man_stem);
-                break;   // first resolvable face wins
+                break;   
             }
         }
     }
@@ -282,8 +281,8 @@ void register_tex_alias(const std::string& alias, const std::string& target_stem
     if (alias.empty() || target_stem.empty()) return;
     std::string a = alias;       std::transform(a.begin(), a.end(), a.begin(), ::tolower);
     std::string t = target_stem; std::transform(t.begin(), t.end(), t.begin(), ::tolower);
-    if (g_registry.count(a)) return;             // first cell wins; don't clobber
-    auto it = g_registry.find(t);                // target must already be indexed
+    if (g_registry.count(a)) return;             
+    auto it = g_registry.find(t);                
     if (it == g_registry.end()) return;
     g_registry[a] = it->second;
     g_stems_sorted.push_back(a);
@@ -293,7 +292,7 @@ void register_tex_alias(const std::string& alias, const std::string& target_stem
 static unsigned int registry_lookup(const std::string& hint) {
     if (hint.empty() || g_registry.empty()) return 0;
 
-    // Strip non-DDS extension before looking up
+    
     std::string base = hint;
     {
         static const char* strip_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
@@ -319,26 +318,26 @@ static unsigned int registry_lookup(const std::string& hint) {
     };
     for (auto& t : tries) {
         auto it = g_registry.find(t);
-        if (it != g_registry.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
+        if (it != g_registry.end()) return load_texture(it->second);
     }
 
-    // IFL alias: "s_str_bas1" → try "s_str_bas1_ifl" which may have been
-    // resolved to the real DDS path in build_tex_registry pass 2.
-    // Also try common game suffixes: _res (resolved texture), _00 (numbered variant).
+    
+    
+    
     {
         static const char* suffixes[] = { "_ifl", "_res", "_00", "_01", nullptr };
         for (int i = 0; suffixes[i]; ++i) {
             std::string key = basel + suffixes[i];
             auto it = g_registry.find(key);
-            if (it != g_registry.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
+            if (it != g_registry.end()) return load_texture(it->second);
         }
     }
 
-    // Prefix match with iterative suffix stripping.
-    // First try the full hint as prefix, then progressively strip trailing _segments.
-    // e.g. "sa_blg_strwal_com" -> prefix "sa_blg_strwal_com_" (no match)
-    //                          -> strip "_com" -> prefix "sa_blg_strwal_" -> finds "sa_blg_strwal04"
-    // Within each level: all-digit suffix wins (lowest number), else shortest named.
+    
+    
+    
+    
+    
     if (!g_stems_sorted.empty()) {
         std::string cur = basel;
         while (!cur.empty()) {
@@ -360,9 +359,9 @@ static unsigned int registry_lookup(const std::string& hint) {
             std::string best = best_numbered.empty() ? best_named : best_numbered;
             if (!best.empty()) {
                 auto rit = g_registry.find(best);
-                if (rit != g_registry.end()) { g_diag_last_tex_path = rit->second; return load_texture(rit->second); }
+                if (rit != g_registry.end()) return load_texture(rit->second);
             }
-            // No match at this level -- strip last _segment and retry
+            
             auto pos = cur.rfind('_');
             if (pos == std::string::npos) break;
             cur = cur.substr(0, pos);
@@ -374,7 +373,7 @@ static unsigned int registry_lookup(const std::string& hint) {
 unsigned int find_texture(const std::string& hint, const std::string& model_dir) {
     if (hint.empty()) return 0;
 
-    // Strip any non-DDS image extension before building variant names
+    
     std::string base = hint;
     {
         static const char* strip_exts[] = { ".tga", ".bmp", ".png", ".jpg", ".jpeg", nullptr };
@@ -402,13 +401,13 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
         (fs::path(model_dir) / "textures").string(),
     };
 
-    // Per-directory listing cache. find_texture() is called once per submesh
-    // (~9000 times during "Load All"), and the same sector folders get hit
-    // hundreds of times each. Re-enumerating a directory with vfs::list_dir()
-    // and rebuilding its lowercased filename map on every call dominated the
-    // whole load (~18s / 78% of wall time, measured). Build each directory's map
-    // ONCE and reuse it. Keyed by normalized dir path; value maps
-    // lowercase-filename -> full path.
+    
+    
+    
+    
+    
+    
+    
     static std::unordered_map<std::string, std::unordered_map<std::string,std::string>> s_dir_cache;
 
     for (auto& dir : search_dirs) {
@@ -431,11 +430,11 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
             std::string vl = v;
             std::transform(vl.begin(), vl.end(), vl.begin(), ::tolower);
             auto it = lmap.find(vl);
-            if (it != lmap.end()) { g_diag_last_tex_path = it->second; return load_texture(it->second); }
+            if (it != lmap.end()) return load_texture(it->second);
         }
     }
 
-    // Global registry fallback — covers textures in other pack directories
+    
     return registry_lookup(hint);
 }
 

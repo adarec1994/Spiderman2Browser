@@ -37,6 +37,10 @@ static std::string strip_instance_suffix(std::string stem) {
     return stem;
 }
 
+static bool is_minion_lizard_model_path(const std::string& path) {
+    return strip_instance_suffix(lower_copy(fs::path(path).stem().string())) == "minion_lizard";
+}
+
 static bool is_skeleton_dat(const std::string& p) {
     auto buf = vfs::read_file(p);
     return buf.size() >= 4 && *reinterpret_cast<const uint32_t*>(buf.data()) == 0x00B5B58Cu;
@@ -67,17 +71,17 @@ static std::vector<std::string> ordered_skeleton_candidates(const fs::path& mode
     return exact;
 }
 
-// Resolve a picked source into a scan root, setting up the VFS to match.
-// A real .iso/.xiso FILE is mounted and its own path becomes the (virtual) scan
-// root, so the rest of the app reads straight from the image. A directory
-// (including extracted *.xiso dumps) unmounts and is scanned on the real FS.
-// Returns "" if the path is neither. Either way the folder code path is identical.
+
+
+
+
+
 static std::string resolve_source(const std::string& picked) {
     if (picked.empty()) return "";
     std::error_code ec;
     if (fs::is_directory(picked, ec)) { vfs::unmount(); return picked; }
     if (fs::is_regular_file(picked, ec)) {
-        if (vfs::mount_iso(picked)) return picked;   // mounted: iso path is the root
+        if (vfs::mount_iso(picked)) return picked;   
         vfs::unmount();
         return fs::path(picked).parent_path().string();
     }
@@ -93,7 +97,7 @@ static glm::quat safe_quat(glm::quat q) {
     return q * (1.0f / std::sqrt(m2));
 }
 
-// ── Skinning ──────────────────────────────────────────────────────────────────
+
 
 void App::compute_skinning() {
     for (int i = 0; i < N_BONES; ++i)
@@ -105,7 +109,7 @@ void App::upload_skinning() {
     m_renderer.set_bone_matrices(m_skinning.data(), N_BONES);
 }
 
-// ── Animation ────────────────────────────────────────────────────────────────
+
 
 void App::load_animations(const std::string& folder) {
     m_anim_clips = scan_animations(folder);
@@ -119,6 +123,33 @@ void App::load_animations(const std::string& folder) {
     for (auto& c : m_anim_clips)
         m_ui_state.anim_names.push_back(c.name);
 
+}
+
+void App::filter_animations_for_model(const std::string& model_path) {
+    if (!is_minion_lizard_model_path(model_path)) return;
+
+    m_anim_clips.erase(
+        std::remove_if(m_anim_clips.begin(), m_anim_clips.end(),
+            [](const AnimClip& c) {
+                std::string name = lower_copy(c.name);
+                return name.rfind("lzmn", 0) != 0;
+            }),
+        m_anim_clips.end());
+
+    m_anim_sel = -1;
+    m_anim_play = false;
+    m_anim_time = 0.f;
+    m_anim_bone_map.clear();
+    m_anim_global_ref_set = false;
+
+    m_ui_state.anim_names.clear();
+    m_ui_state.anim_names.reserve(m_anim_clips.size());
+    for (auto& c : m_anim_clips)
+        m_ui_state.anim_names.push_back(c.name);
+    m_ui_state.anim_sel = -1;
+    m_ui_state.anim_time = 0.f;
+    m_ui_state.anim_dur = 0.f;
+    m_ui_state.anim_playing = false;
 }
 
 void App::extract_animation(int idx) {
@@ -166,7 +197,7 @@ void App::extract_all_animations() {
         m_ui_state.status_msg = "Extracted " + std::to_string(n) + " animations";
 }
 
-// Copy a model's .xbx plus its matching skeleton .dat into extracted_models/<pack>/.
+
 void App::extract_model(int idx) {
     if (idx < 0 || idx >= (int)m_ui_state.files.size()) return;
     fs::path src = m_ui_state.files[idx];
@@ -225,10 +256,10 @@ void App::build_anim_bone_map(const AnimClip& clip) {
     }
 }
 
-// Capture D_source — the source skeleton's standing-pelvis orientation — once,
-// from an idle clip (its frame 0 is the neutral standing pose). Every clip then
-// anchors its root through the same global rotation, so the orientation is
-// consistent across clips instead of a per-clip frame-0 anchor.
+
+
+
+
 void App::ensure_global_root_ref() {
     if (m_anim_global_ref_set) return;
     m_anim_global_ref_set = true;
@@ -239,7 +270,7 @@ void App::ensure_global_root_ref() {
     int idle = -1;
     for (int i = 0; i < (int)m_anim_clips.size(); ++i)
         if (upper(m_anim_clips[i].name).find("IDL") != std::string::npos) { idle = i; break; }
-    if (idle < 0) idle = 0; // fallback: first clip (better a shared ref than per-clip)
+    if (idle < 0) idle = 0; 
 
     AnimClip& ic = m_anim_clips[idle];
     if (!ic.loaded) parse_animation(ic, m_skel_meta);
@@ -285,15 +316,15 @@ void App::select_animation(int idx) {
                                ? m_full_rest_pose[si]
                                : glm::quat(1,0,0,0);
         }
-        clip.frames_decoded = false;  // force re-decode with rest pose
+        clip.frames_decoded = false;  
         clip.cached_frames.clear();
         clip.cached_root_orientations.clear();
     }
 
     if (m_skeleton) build_anim_bone_map(clip);
 
-    // Anchor the root to the shared standing-pelvis reference (captured once from
-    // an idle), so every clip uses the same global orientation.
+    
+    
     ensure_global_root_ref();
 
     apply_animation_pose(0.f);
@@ -313,8 +344,8 @@ void App::apply_animation_pose(float t) {
     int n_anim = (int)poses.size();
     int n_skel = (int)m_skeleton->bones.size();
 
-    // Bind-local transforms: rotation default for un-animated bones, and the
-    // per-bone offset (translation) that every bone keeps.
+    
+    
     std::vector<glm::mat4> local_bind(n_skel, glm::mat4(1.0f));
     for (int i = 0; i < n_skel && i < N_BONES; ++i) {
         int par = m_skeleton->bones[i].parent;
@@ -344,20 +375,48 @@ void App::apply_animation_pose(float t) {
             if (std::isfinite(q_mag2) && q_mag2 >= 1e-8f) {
                 glm::quat anim_q = safe_quat(bp.q);
                 if (par < 0) {
-                    // Root (pelvis / ae_base_bone): its .dat rest is an identity
-                    // placeholder and the in-game fakeroot/trajectory (disabled in
-                    // the viewer) carries the world facing, so anchor the pelvis to
-                    // the shared standing reference. Keeps the character upright in
-                    // one consistent global frame across all clips, with the pelvis
-                    // still rotating by its real per-frame motion.
+                    
+                    
+                    
+                    
+                    
+                    
                     local_q = safe_quat((bind_q * glm::inverse(safe_quat(m_anim_root_ref))) * anim_q);
                 } else {
-                    // Non-root: apply the source's own local rotation directly, the
-                    // way the game drives its skeleton. The XBX bind pose is only the
-                    // skinning reference (inv_bind); using it as the motion base
-                    // (T*anim) would rebase every clip off the bind T-pose.
+                    
+                    
+                    
+                    
                     local_q = anim_q;
                 }
+            }
+        }
+
+        if (m_minion_lizard_model) {
+            float anim_weight = 1.0f;
+            switch (i) {
+                case 10: case 22:
+                    anim_weight = 0.80f;
+                    break;
+                case 11: case 12: case 13: case 14:
+                case 15: case 16: case 17: case 18:
+                case 23: case 24: case 25: case 26:
+                case 27: case 28: case 29: case 30:
+                    anim_weight = 0.45f;
+                    break;
+                case 32: case 38:
+                    anim_weight = 0.70f;
+                    break;
+                case 33: case 34: case 35: case 36:
+                case 39: case 40: case 41: case 42:
+                    anim_weight = 0.62f;
+                    break;
+                default:
+                    break;
+            }
+            if (anim_weight < 1.0f) {
+                if (glm::dot(bind_q, local_q) < 0.0f) local_q = -local_q;
+                local_q = safe_quat(glm::slerp(bind_q, local_q, anim_weight));
             }
         }
 
@@ -386,7 +445,7 @@ void App::tick_animation(double now) {
 
     double dt = now - m_last_frame;
     m_last_frame = now;
-    if (dt > 0.1) dt = 0.1; // clamp large gaps
+    if (dt > 0.1) dt = 0.1; 
 
     const AnimClip& clip = m_anim_clips[m_anim_sel];
     float dur = clip.duration > 0 ? clip.duration
@@ -410,7 +469,7 @@ void App::tick_animation(double now) {
     apply_animation_pose(m_anim_time);
 }
 
-// ── Picking ───────────────────────────────────────────────────────────────────
+
 
 int App::pick_bone(double mx, double my) {
     if (!m_skeleton || !m_gpu_model) return -1;
@@ -436,7 +495,7 @@ int App::pick_bone(double mx, double my) {
     return best_i;
 }
 
-// Möller–Trumbore ray-triangle test
+
 static bool ray_tri(glm::vec3 ro, glm::vec3 rd,
                     glm::vec3 v0, glm::vec3 v1, glm::vec3 v2, float& t) {
     const float EPS = 1e-7f;
@@ -454,31 +513,31 @@ static bool ray_tri(glm::vec3 ro, glm::vec3 rd,
     return t>EPS;
 }
 
-// Build triangle index list from cached raw data + current method
+
 static std::vector<uint32_t> build_tris_for_pick(
     const std::vector<uint16_t>& raw, uint32_t vc, int method_sel)
 {
     std::vector<uint32_t> tris;
     if (!raw.empty()) {
-        if (method_sel==1) { // TList
+        if (method_sel==1) { 
             for (size_t i=0;i+2<raw.size();i+=3) {
                 uint32_t a=raw[i],b=raw[i+1],c=raw[i+2];
                 if (a<vc&&b<vc&&c<vc&&a!=b&&b!=c&&a!=c){tris.push_back(a);tris.push_back(b);tris.push_back(c);}
             }
-        } else if (method_sel==2) { // QuadList
+        } else if (method_sel==2) { 
             for (size_t i=0;i+3<raw.size();i+=4) {
                 uint32_t a=raw[i],b=raw[i+1],c=raw[i+2],d=raw[i+3];
                 if (a<vc&&b<vc&&c<vc&&d<vc){
                     tris.push_back(a);tris.push_back(b);tris.push_back(c);
                     tris.push_back(a);tris.push_back(c);tris.push_back(d);}
             }
-        } else if (method_sel==3) { // TFan
+        } else if (method_sel==3) { 
             if (!raw.empty()&&raw[0]<vc)
                 for (size_t i=1;i+1<raw.size();++i){
                     uint32_t b=raw[i],c=raw[i+1];
                     if (b<vc&&c<vc&&raw[0]!=b&&b!=c&&raw[0]!=c){tris.push_back(raw[0]);tris.push_back(b);tris.push_back(c);}
                 }
-        } else { // TStrip
+        } else { 
             int p=0;
             for (size_t i=0;i+2<raw.size();++i){
                 uint32_t a=raw[i],b=raw[i+1],c=raw[i+2];
@@ -489,7 +548,7 @@ static std::vector<uint32_t> build_tris_for_pick(
                 p^=1;
             }
         }
-    } else { // sequential strip
+    } else { 
         int p=0;
         for (uint32_t i=0;i+2<vc;++i){
             if (p){tris.push_back(i);tris.push_back(i+2);tris.push_back(i+1);}
@@ -503,19 +562,19 @@ static std::vector<uint32_t> build_tris_for_pick(
 void App::try_select(double mx, double my) {
     if (ImGui::GetIO().WantCaptureMouse) return;
 
-    // ── Submesh pick ─────────────────────────────────────────────────────────
+    
     if (m_gpu_model && !m_cached_raw.empty()) {
         int w = vp_w(m_w), h = m_h;
         glm::vec3 ro = m_cam.eye();
         glm::vec3 rd = m_cam.ray_dir((float)mx,(float)my, vp_x(), w, h);
 
-        // Same model matrix as Renderer::draw_scene
+        
         glm::mat4 T    = glm::translate(glm::mat4(1), -m_gpu_model->center);
         glm::mat4 Ry   = glm::rotate(glm::mat4(1), m_model_rot_y, glm::vec3(0,1,0));
         glm::mat4 S    = glm::scale(glm::mat4(1), glm::vec3(1.f/m_gpu_model->scale));
         glm::mat4 Minv = glm::inverse(S * Ry * T);
 
-        // Ray in model-local space
+        
         glm::vec3 lo = glm::vec3(Minv * glm::vec4(ro, 1.f));
         glm::vec3 ld = glm::normalize(glm::vec3(Minv * glm::vec4(rd, 0.f)));
 
@@ -541,7 +600,7 @@ void App::try_select(double mx, double my) {
         if (best_sm >= 0) {
             m_ui_state.sel_submesh = best_sm;
             m_renderer.sel_submesh = best_sm;
-            // Update texture preview
+            
             if (m_gpu_model && best_sm < (int)m_gpu_model->meshes.size()) {
                 m_ui_state.preview_tex_id   = m_gpu_model->meshes[best_sm].tex_id;
                 m_ui_state.preview_tex_name = best_sm < (int)m_ui_state.submeshes.size()
@@ -554,13 +613,13 @@ void App::try_select(double mx, double my) {
         }
     }
 
-    // ── Bone pick fallback ───────────────────────────────────────────────────
+    
     int b = pick_bone(mx,my);
     m_sel_bone = b;
     m_renderer.sel_bone = b;
 }
 
-// ── Rotation ─────────────────────────────────────────────────────────────────
+
 
 void App::begin_rotate(double mx) {
     if (!m_gpu_model) return;
@@ -625,14 +684,22 @@ void App::rebuild_skel_gpu() {
     if (m_gpu_skel && m_skeleton) m_gpu_skel->build(*m_skeleton);
 }
 
-// ── GLFW callbacks ────────────────────────────────────────────────────────────
+
 
 void App::cb_key(GLFWwindow* w, int key, int, int action, int) {
     if (ImGui::GetIO().WantCaptureKeyboard) return;
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_ESCAPE) {
-            if (g_app->m_rot_mode) g_app->cancel_rotate();
-            else glfwSetWindowShouldClose(w,1);
+            if (g_app->m_rot_mode) {
+                g_app->cancel_rotate();
+            } else {
+                g_app->m_ui_state.sel_submesh = -1;
+                g_app->m_renderer.sel_submesh = -1;
+                g_app->m_ui_state.preview_tex_id = 0;
+                g_app->m_ui_state.preview_tex_name.clear();
+                g_app->m_sel_bone = -1;
+                g_app->m_renderer.sel_bone = -1;
+            }
         }
         if (key == GLFW_KEY_R && !g_app->m_rot_mode) {
             double mx,my; glfwGetCursorPos(g_app->m_window,&mx,&my);
@@ -643,7 +710,7 @@ void App::cb_key(GLFWwindow* w, int key, int, int action, int) {
             if (key==GLFW_KEY_Y) g_app->m_rot_axis={0,1,0};
             if (key==GLFW_KEY_Z) g_app->m_rot_axis={0,0,1};
         }
-        // Space = play/stop animation
+        
         if (key == GLFW_KEY_SPACE) {
             if (g_app->m_anim_sel >= 0) {
                 if (!g_app->m_anim_play &&
@@ -659,7 +726,7 @@ void App::cb_key(GLFWwindow* w, int key, int, int action, int) {
                 g_app->m_ui_state.anim_time = g_app->m_anim_time;
                 g_app->m_last_frame         = glfwGetTime();
                 if (!g_app->m_anim_play) {
-                    // Stop: snap to nearest frame
+                    
                     g_app->apply_animation_pose(g_app->m_anim_time);
                 }
             }
@@ -685,7 +752,7 @@ void App::cb_mouse_btn(GLFWwindow*, int btn, int action, int) {
         if (btn == GLFW_MOUSE_BUTTON_RIGHT && in_vp) {
             if (g_app->m_rot_mode) { g_app->cancel_rotate(); }
             else if (g_app->m_world_mode && g_app->m_cam.fly) {
-                // RMB in world/fly mode = mouse-look; capture cursor
+                
                 g_app->m_fly_look = true;
                 g_app->m_lx = mx; g_app->m_ly = my;
                 glfwSetInputMode(g_app->m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -728,7 +795,7 @@ void App::cb_resize(GLFWwindow*, int w, int h) {
     g_app->m_w=w; g_app->m_h=h; glViewport(0,0,w,h);
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+
 
 bool App::init(int w, int h, const char* title) {
     g_app=this; m_w=w; m_h=h;
@@ -761,15 +828,15 @@ bool App::init(int w, int h, const char* title) {
     m_renderer.init();
     setup_callbacks();
 
-    // ── Resume from previous session ─────────────────────────────────────────
-    // Prefer the .xiso path; fall back to a saved folder. If neither resolves,
-    // show the splash screen so the user can pick a source.
+    
+    
+    
     std::string saved_xiso, saved_folder;
     UI::load_config(saved_xiso, saved_folder);
 
-    // A saved source may be a real .iso file, an extracted folder, or an *.xiso
-    // directory dump. resolve_source() mounts an iso (VFS) or returns the folder;
-    // scan_folder() then behaves identically for both.
+    
+    
+    
     std::string picked = !saved_xiso.empty() ? saved_xiso : saved_folder;
     if (!picked.empty() && fs::exists(picked)) {
         std::string root = resolve_source(picked);
@@ -788,9 +855,9 @@ bool App::init(int w, int h, const char* title) {
 
 void App::setup_callbacks() {
     m_ui_cb.on_scan_folder  = [this](const std::string& f){
-        vfs::unmount();                       // a directly-picked folder is real FS
+        vfs::unmount();                       
         m_ui_state.folder = f;
-        // Folder picked directly (not via .xiso) — clear the iso pointer
+        
         m_ui_state.xiso_path.clear();
         UI::save_config("", f);
         m_ui_state.show_splash = false;
@@ -798,7 +865,7 @@ void App::setup_callbacks() {
     };
     m_ui_cb.on_select_xiso  = [this](const std::string& xiso){
         m_ui_state.xiso_path = xiso;
-        // Mount a real .iso (VFS), or fall back to folder behaviour for a dir.
+        
         std::string root = resolve_source(xiso);
         m_ui_state.folder = root;
         UI::save_config(xiso, root);
@@ -837,12 +904,12 @@ void App::setup_callbacks() {
         if (i >= 0 && i < (int)m_ui_state.world_files.size())
             load_world(m_ui_state.world_files[i]);
     };
-    // Defer the heavy load out of this ImGui-frame-time callback; run() services
-    // the flag at the top of the loop where no ImGui frame is open.
+    
+    
     m_ui_cb.on_load_all_worlds = [this](){ m_pending_load_all = true; };
 }
 
-// ── Scan + Load ───────────────────────────────────────────────────────────────
+
 
 void App::scan_folder(const std::string& folder) {
     m_ui_state.files.clear();
@@ -856,14 +923,14 @@ void App::scan_folder(const std::string& folder) {
     std::sort(m_ui_state.files.begin(),m_ui_state.files.end());
     m_ui_state.status_msg = std::to_string(m_ui_state.files.size())+" files found";
 
-    // Build global texture registry for cross-pack resolution
+    
     build_tex_registry(folder);
     get_registry_entries(m_ui_state.all_tex_entries);
 
-    // Scan for animations in same folder
+    
     load_animations(folder);
 
-    // ── World .dat files: bare stem (no _NNNNNNNN suffix) ────────────────────
+    
     m_ui_state.world_files.clear();
     {
         for (auto& fp : vfs::walk_files(folder)) {
@@ -872,23 +939,23 @@ void App::scan_folder(const std::string& folder) {
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext != ".dat") continue;
             std::string stem = p.stem().string();
-            // World area files have cell-ID stems: 1-3 uppercase letters + 2-3 digits
-            // + optional trailing letter (e.g. A01, F48, G60, A01R, C22I01).
-            // Everything else (ARMORED_THUG, BLACK_CAT, BCRUN, etc.) is excluded.
+            
+            
+            
             {
-                // Must have no underscore and match [A-Z]{1,3}[0-9]{2,3}[A-Z]?
+                
                 if (stem.find('_') != std::string::npos) continue;
                 size_t i = 0;
-                // 1-3 leading letters
+                
                 while (i < stem.size() && std::isupper((unsigned char)stem[i])) ++i;
                 if (i < 1 || i > 3) continue;
                 size_t alpha_end = i;
-                // 2-3 digits
+                
                 while (i < stem.size() && std::isdigit((unsigned char)stem[i])) ++i;
                 if (i - alpha_end < 2 || i - alpha_end > 3) continue;
-                // optional trailing letter(s)
+                
                 while (i < stem.size() && std::isupper((unsigned char)stem[i])) ++i;
-                if (i != stem.size()) continue; // unexpected chars
+                if (i != stem.size()) continue; 
             }
             m_ui_state.world_files.push_back(fp);
         }
@@ -896,7 +963,7 @@ void App::scan_folder(const std::string& folder) {
     }
 
 
-    // ── XBX registry: lowercase_stem → absolute_path ─────────────────────────
+    
     m_xbx_registry.clear();
     {
         for (auto& fp : vfs::walk_files(folder)) {
@@ -908,37 +975,37 @@ void App::scan_folder(const std::string& folder) {
                 m_xbx_registry[stem] = fp;
         }
 
-        // Build base index: strip trailing digits/underscore-digits from each stem
-        // so lookups like "s_trfflitea" instantly find "s_trfflitea_00000001"
+        
+        
         m_xbx_base_index.clear();
         for (auto& [stem, path] : m_xbx_registry) {
-            // Pattern A: base_00000001 -> base
+            
             std::string base = stem;
             if (base.size() > 9) {
                 std::string tail = base.substr(base.size() - 9);
                 if (tail[0] == '_' && std::all_of(tail.begin()+1, tail.end(), ::isdigit))
                     base = base.substr(0, base.size() - 9);
             }
-            // Pattern B: base000 -> base (trailing digits only)
+            
             if (base == stem) {
                 while (!base.empty() && std::isdigit((unsigned char)base.back()))
                     base.pop_back();
             }
             if (base != stem && base.size() >= 3) {
-                // keep the lexicographically smallest stem for each base
+                
                 auto it = m_xbx_base_index.find(base);
                 if (it == m_xbx_base_index.end() || stem < it->second)
                     m_xbx_base_index[base] = stem;
             }
         }
 
-        // Build suffix index: for each stem, index every underscore-split suffix
-        // so "s_strtlampb_00000001" is findable via "strtlampb"
+        
+        
         m_xbx_suffix_index.clear();
         for (auto& [stem, path] : m_xbx_registry) {
             std::string s = stem;
             while (!s.empty()) {
-                // strip trailing digits and underscores to get base suffix
+                
                 std::string base = s;
                 while (!base.empty() && (std::isdigit((unsigned char)base.back()) || base.back() == '_'))
                     base.pop_back();
@@ -953,11 +1020,11 @@ void App::scan_folder(const std::string& folder) {
     }
 }
 
-// ── World loading ─────────────────────────────────────────────────────────────
+
 
 void App::clear_world() {
-    // Release the instanced world FIRST (its per-instance buffers reference, but
-    // don't own, the cache models), then free the cache geometry.
+    
+    
     m_instanced_world.release();
     for (auto& [k, gm] : m_world_gpu_cache) { if (gm) { gm->release(); delete gm; } }
     m_world_gpu_cache.clear();
@@ -965,7 +1032,7 @@ void App::clear_world() {
     m_world_bb_min = glm::vec3( 1e9f);
     m_world_bb_max = glm::vec3(-1e9f);
     m_world_mode = false;
-    m_cam.fly    = false;    // restore orbit camera
+    m_cam.fly    = false;    
     m_fly_look   = false;
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     m_ui_state.world_mode            = false;
@@ -979,13 +1046,13 @@ void App::clear_world() {
 GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
     if (asset_name.empty()) return nullptr;
 
-    // Garbage filter: reject pure binary junk (e.g. "h4bC"). Real asset names are
-    // clean single-case identifiers, but the heuristic world parser sometimes
-    // prepends a junk/cell-prefix token before the real name (e.g.
-    // "Vc22_i01front003" → "i01front003", "Djxd_bulbcage000" → "bulbcage000").
-    // Such names have a mixed-case junk token but a CLEAN suffix token that the
-    // underscore-walk below recovers. Only bail if NO '_'-separated token is a
-    // clean identifier: >=3 chars, >=1 letter, no punctuation, not mixed-case.
+    
+    
+    
+    
+    
+    
+    
     {
         bool any_clean = false;
         size_t i = 0, n = asset_name.size();
@@ -1026,37 +1093,52 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
     auto try_stem = [&](const std::string& stem) -> GPUModel* {
         if (stem.size() < 3) return nullptr;
 
-        // 1. exact
+        
         if (auto* gm = try_load(stem)) return gm;
 
-        // strip trailing digits and underscores to get base
+        
+        
+        
+        
+        
+        
+        if (stem.size() >= 6) {
+            size_t n = stem.size();
+            if (std::isdigit((unsigned char)stem[n-1]) && std::isdigit((unsigned char)stem[n-2]) &&
+                std::isdigit((unsigned char)stem[n-3])) {
+                std::string s3 = stem.substr(0, n - 3);
+                if (auto* gm = try_load(s3)) return gm;
+            }
+        }
+
+        
         std::string base = stem;
         while (!base.empty() && (std::isdigit((unsigned char)base.back()) || base.back() == '_'))
             base.pop_back();
         if (base.empty() || base.size() < 3) return nullptr;
 
-        // 2. base exact  (sg_stor_15d000 -> sg_stor_15d)
+        
         if (base != stem)
             if (auto* gm = try_load(base)) return gm;
 
-        // 3. base index O(1)
+        
         {
             auto bi = m_xbx_base_index.find(base);
             if (bi != m_xbx_base_index.end())
                 if (auto* gm = try_load(bi->second)) return gm;
         }
 
-        // 4. suffix index - only for long-enough bases to avoid false matches
-        //    (min 8 chars: strtlampb=9, rfaccessa=9, indroofc=8, trfflitea=9)
-        //    (blocked: helipad=7, tanka=5 etc.)
+        
+        
+        
         if (base.size() >= 8) {
-            // exact suffix index hit
+            
             auto si = m_xbx_suffix_index.find(base);
             if (si != m_xbx_suffix_index.end())
                 if (auto* gm = try_load(si->second)) return gm;
 
-            // prefix scan within suffix index (trfflite -> trfflitea, trffliteb...)
-            // suffix_index is small (~5k entries) so this is fast
+            
+            
             for (auto& [k, v] : m_xbx_suffix_index) {
                 if (k.size() > base.size() && k.rfind(base, 0) == 0)
                     if (auto* gm = try_load(v)) return gm;
@@ -1066,7 +1148,7 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
         return nullptr;
     };
 
-    // Walk underscore-split suffixes longest first, max 4 strips
+    
     std::string cur = key;
     int strips = 0;
     while (!cur.empty() && strips <= 4) {
@@ -1088,15 +1170,15 @@ GPUModel* App::world_get_or_load_model(const std::string& asset_name) {
 
 
 
-// Build draw calls from one parsed WorldData, appending into m_world_draws.
-// Helper: given a GPUModel, return the matrix that un-normalises its vertices
-// back to their original coordinate space. draw_scene applies S*T internally;
-// for world rendering we pre-bake it so the renderer just does MVP = VP * xform.
-// upload_model normalises each model's vertices: v_stored = (v_local - center) / scale
-// draw_scene undoes this with M = scale(1/scale) * translate(-center) for single-model view.
-// For world rendering we need the inverse un-normalisation THEN the world placement:
-//   final = world_xform * translate(center) * scale(scale_factor)
-// This maps stored vertices back to local space, then into the world.
+
+
+
+
+
+
+
+
+
 void App::build_world_draws(const WorldData& wd) {
     auto lower = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s;
@@ -1108,20 +1190,20 @@ void App::build_world_draws(const WorldData& wd) {
         m_world_bb_max = glm::max(m_world_bb_max, p);
     };
 
-    // Register this cell's building-atlas master->texture aliases BEFORE loading
-    // its models, so building blocks (smlego: s_blg_blgmaster/pedmaster, s_blg_trm)
-    // resolve to a real wall texture instead of rendering gray. The full per-face
-    // slot system (per-side textures) isn't reproduced; we pick a representative
-    // texture per master — for blgmaster prefer a "sid1" wall, for pedmaster a
-    // "ped" face, for trm the first trim — which makes buildings read as brick/
-    // stone. First cell to define a master wins (models are globally cached).
+    
+    
+    
+    
+    
+    
+    
     {
         auto pick = [&](const std::string& master, const char* prefer) -> std::string {
             std::string best;
             for (auto& bt : wd.blg_textures) {
                 if (bt.master != master) continue;
-                if (best.empty()) best = bt.texture;                 // fallback: first
-                if (bt.texture.find(prefer) != std::string::npos) return bt.texture; // preferred
+                if (best.empty()) best = bt.texture;                 
+                if (bt.texture.find(prefer) != std::string::npos) return bt.texture; 
             }
             return best;
         };
@@ -1135,26 +1217,59 @@ void App::build_world_draws(const WorldData& wd) {
 
     for (auto& inst : wd.instances) {
         GPUModel* gm = world_get_or_load_model(inst.asset_name);
-        // Fallback: the instance NAME encodes the asset (cell_S_ASSET, e.g.
-        // "C15_S_TRFFLITE00" → "s_trfflite", "H_H_RFACCESSA" → "rfaccessa"). When
-        // the parsed asset ref is empty/unresolved, derive from the name — the
-        // underscore-walk strips the cell/group prefix. Logical markers
-        // (SPAWNPOINT/_TRIG/MARK_FACING) simply won't resolve and stay skipped.
+        
+        
+        
+        
+        
         if (!gm && !inst.name.empty() && inst.name != inst.asset_name)
             gm = world_get_or_load_model(inst.name);
         if (!gm) continue;
         m_world_draws.push_back({ gm, inst.transform });
         acc_bb(inst.transform);
     }
+    
+    
+    
+    std::vector<unsigned int> blg_pal;
+    std::unordered_map<int, unsigned int> blg_slot2tex;
+    for (auto& bt : wd.blg_textures) {
+        unsigned int t = find_texture_world(bt.texture);
+        if (!t) continue;
+        blg_pal.push_back(t);
+        blg_slot2tex.emplace(bt.slot, t);
+    }
+
     for (auto& prop : wd.props) {
         if (prop.type_idx < 0 || prop.type_idx >= (int)wd.prop_types.size()) continue;
         GPUModel* gm = world_get_or_load_model(wd.prop_types[prop.type_idx]);
         if (!gm) continue;
         float yr = glm::radians(prop.yaw_deg);
-        glm::mat4 xf = glm::translate(glm::mat4(1.f), glm::vec3(prop.x, prop.y, prop.z));
-        xf = glm::rotate(xf, yr, glm::vec3(0.f, 1.f, 0.f));
-        m_world_draws.push_back({ gm, xf });
-        acc_bb(xf);
+        
+        
+        unsigned int ov = 0;
+        if (prop.slot >= 0 && !blg_pal.empty()) {
+            auto it = blg_slot2tex.find(prop.slot);
+            ov = (it != blg_slot2tex.end()) ? it->second
+                                            : blg_pal[(size_t)prop.slot % blg_pal.size()];
+        }
+        
+        
+        
+        
+        
+        float fh = gm->bb_ymax - gm->bb_ymin;
+        int floors = 1;
+        if (prop.height > 0.f && fh > 0.5f) {
+            floors = (int)std::lround(prop.height / fh);
+            floors = std::max(1, std::min(floors, 60));
+        }
+        for (int f = 0; f < floors; ++f) {
+            glm::mat4 xf = glm::translate(glm::mat4(1.f), glm::vec3(prop.x, prop.y + (float)f * fh, prop.z));
+            xf = glm::rotate(xf, yr, glm::vec3(0.f, 1.f, 0.f));
+            m_world_draws.push_back({ gm, xf, ov });
+            if (f == 0) acc_bb(xf);
+        }
     }
 
 }
@@ -1162,61 +1277,61 @@ void App::build_world_draws(const WorldData& wd) {
 void App::finalize_world_merge() {
     if (m_world_draws.empty()) return;
 
-    // Group placements by unique model into instanced draw calls. The geometry is
-    // SHARED with m_world_gpu_cache (one copy per unique model), so we keep the
-    // cache alive — m_instanced_world only adds a small per-instance transform
-    // buffer per unique model.
-    std::vector<std::pair<GPUModel*, glm::mat4>> insts;
+    
+    
+    
+    
+    std::vector<WorldPlacement> insts;
     insts.reserve(m_world_draws.size());
-    for (auto& dc : m_world_draws) insts.push_back({ dc.model, dc.xform });
+    for (auto& dc : m_world_draws) insts.push_back({ dc.model, dc.xform, dc.tex_override });
 
     m_instanced_world.release();
     m_instanced_world = m_renderer.build_instanced_world(insts);
 
-    // m_world_draws is no longer used for rendering (the instanced world is), but
-    // its pointers remain valid (owned by m_world_gpu_cache). Clear it to free the
-    // per-placement bookkeeping; keep the cache + instanced world intact.
+    
+    
+    
     m_world_draws.clear();
 }
 
 void App::recentre_camera_on_world() {
-    // Use the bbox accumulated during build_world_draws (valid even after the
-    // per-instance draw list has been freed by the merge).
+    
+    
     glm::vec3 mn = m_world_bb_min, mx = m_world_bb_max;
-    if (mn.x > mx.x) return;  // nothing accumulated
+    if (mn.x > mx.x) return;  
     glm::vec3 centre = (mn + mx) * 0.5f;
     glm::vec3 size   = mx - mn;
     float     extent = glm::length(size);
 
-    // Spawn the camera AT a human/street scale just above the scene, NOT
-    // proportional to the whole-city extent. The old `centre + extent*0.4`
-    // parked the eye thousands of units away for a full "Load All" (city
-    // extent ~6000), collapsing everything into a dark sliver on the horizon —
-    // which read as "all black". Use a modest absolute standoff so you start
-    // inside the city looking along it. Height tracks the scene's vertical size
-    // (so single-cell loads frame nicely too) but is clamped to a sane range.
+    
+    
+    
+    
+    
+    
+    
     float height  = glm::clamp(size.y * 1.5f + 40.f, 40.f, 400.f);
     float standoff = glm::clamp(std::max(size.x, size.z) * 0.10f, 60.f, 600.f);
     glm::vec3 start = centre + glm::vec3(0.f, height, standoff);
     m_cam.reset_fly(start);
-    // Fly speed scaled to the scene but bounded so it's controllable.
+    
     m_cam.fly_speed = glm::clamp(extent * 0.04f, 20.f, 400.f);
 
-    // Aim the camera at the scene centre.
+    
     glm::vec3 dir = glm::normalize(centre - start);
     m_cam.yaw   = glm::degrees(atan2f(dir.x, dir.z));
     m_cam.pitch = glm::degrees(asinf(glm::clamp(dir.y, -1.f, 1.f)));
 }
 
-// Load the terrain XBX for a sector: same stem as the .dat, same directory.
-// e.g. CITY_STRIP_A/A01/A01.dat  ->  looks for A01 in xbx_registry
-// Adds it at identity so it renders at world origin (terrain is pre-placed in world space).
+
+
+
 void App::load_sector_terrain(const std::string& dat_path) {
     std::string stem = fs::path(dat_path).stem().string();
     std::string key  = stem;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    // Try stem then stem+"r" (terrain XBX is always named {sector}r)
+    
     GPUModel* gm = world_get_or_load_model(key);
     if (!gm) gm = world_get_or_load_model(key + "r");
     if (gm)
@@ -1256,14 +1371,14 @@ void App::load_world(const std::string& dat_path) {
 
     build_world_draws(*wd);
     load_sector_terrain(dat_path);
-    finalize_world_merge();   // bake into per-texture batches; free per-model GPU buffers
+    finalize_world_merge();   
     recentre_camera_on_world();
     m_world_mode                     = true;
     m_ui_state.world_mode            = true;
     m_ui_state.world_instance_count  = (int)wd->instances.size();
     m_ui_state.world_prop_count      = (int)wd->props.size();
     m_ui_state.world_dat_path        = dat_path;
-    m_ui_state.world_load_progress   = -1.f;  // hide bar
+    m_ui_state.world_load_progress   = -1.f;  
     m_ui_state.status_msg            = "World loaded";
     delete wd;
 }
@@ -1311,8 +1426,8 @@ void App::load_all_worlds() {
         std::string fname = fs::path(m_ui_state.world_files[fi]).filename().string();
         m_ui_state.world_load_status   = fname;
 
-        // Keep the window alive + show progress so a 400+ file load doesn't read
-        // as a freeze ("Not Responding"). Pump every few files to amortise cost.
+        
+        
         if (fi % 4 == 0)
             pump_loading_frame(fname.c_str(), (float)fi / n_files);
 
@@ -1326,7 +1441,7 @@ void App::load_all_worlds() {
     }
 
     pump_loading_frame("Merging geometry...", 1.f);
-    finalize_world_merge();   // group placements into instanced draws (geometry shared)
+    finalize_world_merge();   
     recentre_camera_on_world();
     m_world_mode                     = true;
     m_ui_state.world_mode            = true;
@@ -1354,17 +1469,19 @@ void App::load_file(int idx) {
     m_anim_sel=-1; m_anim_play=false; m_anim_time=0.f;
     m_ui_state.anim_sel=-1; m_ui_state.anim_playing=false;
     m_full_rest_pose.clear();
-    m_anim_global_ref_set = false;  // recapture standing-pelvis ref for the new model
+    m_anim_global_ref_set = false;  
+    m_minion_lizard_model = is_minion_lizard_model_path(path);
 
-    XBXModel* model = parse_xbx(path, /*primary_geom_only=*/true);
+    XBXModel* model = parse_xbx(path,  true);
     if (!model) { m_ui_state.status_msg="Error: Not XBXM or no geometry"; return; }
 
     m_gpu_model = m_renderer.upload_model(model);
     m_ui_state.has_model=true;
     m_ui_state.status_msg="Loaded";
 
-    // Load animations from the same directory as the model file
+    
     load_animations(fs::path(path).parent_path().string());
+    filter_animations_for_model(path);
 
     m_cached_raw.clear();
     m_cached_raw.resize(model->submeshes.size());
@@ -1379,11 +1496,11 @@ void App::load_file(int idx) {
         m_cached_raw[i].vc        = (uint32_t)sm.positions.size();
         m_cached_raw[i].positions = sm.positions;
 
-        // Determine default method_sel from prim_type (raw Xbox D3DPRIMITIVETYPE)
-        int default_sel = 0; // TStrip (6)
-        if (sm.prim_type == 5) default_sel = 1; // TList
-        if (sm.prim_type == 8) default_sel = 2; // QuadList
-        if (sm.from_pushbuffer) default_sel = 0; // +0x38 pushbuffer data is strip-like
+        
+        int default_sel = 0; 
+        if (sm.prim_type == 5) default_sel = 1; 
+        if (sm.prim_type == 8) default_sel = 2; 
+        if (sm.from_pushbuffer) default_sel = 0; 
 
         const char* method_label = "TStrip";
         if (default_sel == 1) method_label = "TList";
@@ -1402,7 +1519,7 @@ void App::load_file(int idx) {
         m_ui_state.submeshes.push_back(si);
     }
 
-    // ── Bind pose ──
+    
     if ((int)model->bind_pose.size() >= N_BONES) {
         for (int i=0;i<N_BONES;++i) {
             m_bind_pose[i] = model->bind_pose[i];
@@ -1414,9 +1531,9 @@ void App::load_file(int idx) {
         m_renderer.set_bone_matrices(m_skinning.data(), N_BONES);
     }
 
-    // ── Skeleton ── prefer a skeleton .dat whose stem matches the model stem
-    // (e.g. MINION_LIZARD_00000003.xbx -> MINION_LIZARD.dat), then fall back
-    // to any skeleton-looking .dat in the same pack.
+    
+    
+    
     std::string skel_path;
     for (const std::string& candidate : ordered_skeleton_candidates(fs::path(path))) {
         Skeleton* sk = parse_skeleton(candidate, path);
@@ -1428,18 +1545,20 @@ void App::load_file(int idx) {
         }
     }
 
-    // Per-skeleton animation metadata (bone count, rest-pose quats, per-source
-    // scales) located dynamically in the skeleton .dat, so any character
-    // animates, not just Black Cat.
+    
+    
+    
     int bone_count = m_skeleton ? std::min((int)m_skeleton->bones.size(), N_BONES) : 0;
     m_skel_meta = load_skeleton_meta(skel_path, bone_count);
+    if (m_minion_lizard_model)
+        m_skel_meta.quat_effective_scale_cap = 0.0078125f;
     m_full_rest_pose = m_skel_meta.rest_pose;
 
     delete model;
     m_cam.reset();
 }
 
-// ── Run ───────────────────────────────────────────────────────────────────────
+
 
 void App::run() {
     m_last_frame = glfwGetTime();
@@ -1447,8 +1566,8 @@ void App::run() {
         glfwPollEvents();
         glfwGetFramebufferSize(m_window,&m_w,&m_h);
 
-        // Service a deferred "Load All" here — OUTSIDE any open ImGui frame — so
-        // load_all_worlds() can safely pump its own progress frames.
+        
+        
         if (m_pending_load_all) {
             m_pending_load_all = false;
             load_all_worlds();
@@ -1456,20 +1575,7 @@ void App::run() {
         }
         double now = glfwGetTime();
 
-        static int s_la = 0;
-        if (s_la == 0 && std::getenv("SM2_LOADALL")) { s_la = 1; m_pending_load_all = true; }
-        else if (s_la == 1 && std::getenv("SM2_LOADALL")) {
-            s_la = 2;
-            if (std::getenv("SM2_PIXDIAG")) {   // street-level view to see missing walls
-                glm::vec3 mn=m_world_bb_min, mx=m_world_bb_max, c=(mn+mx)*0.5f;
-                glm::vec3 eye = glm::vec3(c.x, mn.y + 35.f, c.z);  // low, near centre
-                m_cam.reset_fly(eye);
-                m_cam.yaw = 35.f; m_cam.pitch = 2.f;              // look roughly horizontal
-            }
-        }
-        else if (s_la == 2 && std::getenv("SM2_LOADALL") && !std::getenv("SM2_PIXDIAG")) { glfwSetWindowShouldClose(m_window, 1); }
-
-        // ── Fly cam WASD tick ─────────────────────────────────────────────────
+        
         if (m_world_mode && m_cam.fly && !ImGui::GetIO().WantCaptureKeyboard) {
             unsigned keys = 0;
             if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) keys |= 1;
@@ -1499,7 +1605,7 @@ void App::run() {
                   m_renderer.wireframe,m_renderer.show_grid,m_renderer.show_skel,
                   m_renderer.show_uv,m_h);
 
-        // Rotation HUD
+        
         if (m_rot_mode) {
             ImGui::SetNextWindowPos({(float)vp_x()+10,10});
             ImGui::SetNextWindowBgAlpha(0.65f);
@@ -1516,7 +1622,7 @@ void App::run() {
             ImGui::End();
         }
 
-        // Fly cam HUD
+        
         if (m_world_mode && m_cam.fly) {
             ImGui::SetNextWindowPos({(float)vp_x()+10, 10});
             ImGui::SetNextWindowBgAlpha(0.55f);
@@ -1537,11 +1643,11 @@ void App::run() {
 
         int w=vp_w(m_w);
         if (m_world_mode && !m_instanced_world.models.empty()) {
-            // Instanced path: one instanced draw per unique submesh (no per-instance
-            // cull → terrain no longer vanishes up close).
+            
+            
             m_renderer.draw_instanced_world(m_cam, vp_x(), w, m_h, m_instanced_world);
         } else if (m_world_mode && !m_world_draws.empty()) {
-            // Fallback per-instance path (kept for safety if the build produced nothing).
+            
             std::vector<std::pair<GPUModel*, glm::mat4>> draws;
             draws.reserve(m_world_draws.size());
             for (auto& dc : m_world_draws) draws.push_back(std::make_pair(dc.model, dc.xform));
@@ -1550,15 +1656,6 @@ void App::run() {
             m_renderer.draw_scene(m_cam,vp_x(),w,m_h,m_gpu_model,m_gpu_skel);
         }
 
-        static int s_df=-2;
-        if (s_df!=-1 && std::getenv("SM2_PIXDIAG") && (m_world_mode||m_ui_state.has_model)) {
-            if (s_df<0) s_df=60;
-            if (s_df-- == 0){ int W=w,H=m_h,X=vp_x(),DS=1,ow=W/DS,oh=H/DS;
-                std::vector<unsigned char> px((size_t)W*H*3); glReadPixels(X,0,W,H,GL_RGB,GL_UNSIGNED_BYTE,px.data());
-                std::ofstream pp("fb_dump.ppm",std::ios::binary); pp<<"P6\n"<<ow<<" "<<oh<<"\n255\n";
-                for(int yy=oh-1;yy>=0;--yy)for(int xx=0;xx<ow;++xx){size_t s=((size_t)(yy*DS)*W+(xx*DS))*3;pp.put((char)px[s]);pp.put((char)px[s+1]);pp.put((char)px[s+2]);}
-                s_df=-1; }
-        }
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(m_window);
     }

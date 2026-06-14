@@ -8,10 +8,8 @@ project(${APP_TARGET} VERSION 1.0 DESCRIPTION "${APP_DISPLAY_NAME}" LANGUAGES CX
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── FetchContent ──────────────────────────────────────────
 include(FetchContent)
 
-# GLFW
 FetchContent_Declare(glfw
         GIT_REPOSITORY https://github.com/glfw/glfw.git
         GIT_TAG        3.4
@@ -21,7 +19,6 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
-# GLAD
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_Declare(glad
         GIT_REPOSITORY https://github.com/Dav1dde/glad.git
@@ -29,14 +26,12 @@ FetchContent_Declare(glad
         GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(glad)
 
-# GLM
 FetchContent_Declare(glm
         GIT_REPOSITORY https://github.com/g-truc/glm.git
         GIT_TAG        1.0.1
         GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(glm)
 
-# ImGui (with GLFW+OpenGL3 backends)
 FetchContent_Declare(imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
         GIT_TAG        v1.91.6
@@ -56,7 +51,6 @@ target_include_directories(imgui_lib PUBLIC
         ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui_lib PUBLIC glfw)
 
-# ImGuiFileDialog
 FetchContent_Declare(imguifiledialog
         GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
         GIT_TAG        v0.6.7
@@ -69,7 +63,6 @@ target_include_directories(imguifiledialog_lib PUBLIC
         ${imguifiledialog_SOURCE_DIR})
 target_link_libraries(imguifiledialog_lib PUBLIC imgui_lib)
 
-# STB
 FetchContent_Declare(stb
         GIT_REPOSITORY https://github.com/nothings/stb.git
         GIT_TAG        master
@@ -79,7 +72,6 @@ FetchContent_MakeAvailable(stb)
 add_library(stb_lib INTERFACE)
 target_include_directories(stb_lib INTERFACE ${stb_SOURCE_DIR})
 
-# ── Sources ───────────────────────────────────────────────
 set(SOURCES
         src/core/main.cpp
         src/core/App.cpp
@@ -114,11 +106,6 @@ target_link_libraries(${APP_TARGET} PRIVATE
         imguifiledialog_lib
         stb_lib)
 
-# MSVC: embed debug info in each .obj (/Z7) instead of a shared vc140.pdb.
-# A parallel build (CLion) runs multiple cl.exe that race to write the same PDB,
-# failing intermittently with C1041 "cannot open program database". /Z7 removes
-# the shared PDB entirely (also avoids OneDrive locking a .pdb under the build
-# dir). /FS guards any remaining PDB writer (e.g. third-party deps).
 if(MSVC)
     target_compile_options(${APP_TARGET} PRIVATE
             $<$<CONFIG:Debug>:/Z7>

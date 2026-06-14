@@ -36,7 +36,7 @@ private:
 
     std::unique_ptr<Skeleton>  m_skeleton;
 
-    // Skinning matrices
+    
     static constexpr int N_BONES = 60;
     std::array<glm::mat4, 60>  m_bind_pose;
     std::array<glm::mat4, 60>  m_inv_bind;
@@ -44,25 +44,25 @@ private:
     std::array<glm::mat4, 60>  m_skinning;
     bool                        m_has_bones = false;
 
-    // Selection
+    
     int   m_sel_bone = -1;
 
-    // Rotate mode (Blender-style R)
+    
     bool      m_rot_mode    = false;
     double    m_rot_start_x = 0;
     float     m_rot_accum   = 0.f;
     glm::vec3 m_rot_axis{0,1,0};
     std::array<glm::mat4, 60> m_cur_pose_backup;
 
-    // Whole-model rotation
+    
     float m_model_rot_y = 0.f;
 
-    // Mouse
+    
     bool   m_drag_l   = false, m_drag_r = false;
     double m_lx = 0,   m_ly   = 0;
-    bool   m_fly_look = false;  // RMB held in world fly mode = mouse-look
+    bool   m_fly_look = false;  
 
-    // ── Animation ─────────────────────────────────────────────────────────────
+    
     std::vector<AnimClip> m_anim_clips;
     int                   m_anim_sel   = -1;
     bool                  m_anim_play  = false;
@@ -70,71 +70,73 @@ private:
     double                m_last_frame = 0.0;
 
     void load_animations(const std::string& folder);
+    void filter_animations_for_model(const std::string& model_path);
     void select_animation(int idx);
     void tick_animation(double now);
     void apply_animation_pose(float t);
     void extract_animation(int idx);
     void extract_all_animations();
-    void extract_model(int idx);   // right-click: copy model .xbx + its skeleton .dat for inspection
+    void extract_model(int idx);   
 
     std::vector<int> m_anim_bone_map;
-    glm::quat m_anim_root_ref{1, 0, 0, 0}; // shared standing-pelvis ref (D_source) for the global anchor
+    glm::quat m_anim_root_ref{1, 0, 0, 0}; 
     bool      m_anim_global_ref_set = false;
-    void ensure_global_root_ref();         // capture D_source once from an idle clip (clip-independent)
+    bool      m_minion_lizard_model = false;
+    void ensure_global_root_ref();         
     void build_anim_bone_map(const AnimClip& clip);
-    SkeletonAnimMeta m_skel_meta;            // per-skeleton bone count / rest pose / scales
-    std::vector<glm::quat> m_full_rest_pose; // skeleton rest quats (fill for un-animated bones)
+    SkeletonAnimMeta m_skel_meta;            
+    std::vector<glm::quat> m_full_rest_pose; 
 
     struct RawMeshData { std::vector<uint16_t> raw; uint32_t vc;
                          std::vector<glm::vec3> positions; };
     std::vector<RawMeshData> m_cached_raw;
 
-    // ── World / area ──────────────────────────────────────────────────────────
+    
     std::unordered_map<std::string, GPUModel*>   m_world_gpu_cache;
     std::unordered_map<std::string, std::string> m_xbx_registry;
-    // base stem -> first full stem (for O(1) base+digits lookup)
-    // e.g. "s_trfflitea" -> "s_trfflitea_00000001"
+    
+    
     std::unordered_map<std::string, std::string> m_xbx_base_index;
-    // underscore-suffix -> best matching stem
-    // e.g. "strtlampb" -> "s_strtlampb_00000001"
+    
+    
     std::unordered_map<std::string, std::string> m_xbx_suffix_index;
 
-    struct WorldDrawCall { GPUModel* model; glm::mat4 xform; };
+    struct WorldDrawCall { GPUModel* model; glm::mat4 xform; unsigned int tex_override = 0; };
     std::vector<WorldDrawCall> m_world_draws;
-    // Instanced world: placements grouped per unique model, drawn with instanced
-    // draw calls (built once after a world load). Replaces the per-instance draw
-    // path — collapsing tens of thousands of draws to ~one per unique submesh and
-    // removing the per-instance frustum cull that made big terrain vanish up
-    // close. The referenced GPUModels stay owned by m_world_gpu_cache.
+    
+    
+    
+    
+    
     InstancedWorld m_instanced_world;
-    // World bbox of all instance origins, accumulated during build_world_draws so
-    // recentre_camera_on_world() works even after the per-instance draw list is
-    // freed by the merge.
+    
+    
+    
     glm::vec3 m_world_bb_min{ 1e9f}, m_world_bb_max{-1e9f};
     bool m_world_mode = false;
-    // "Load All" is requested from an ImGui button callback, which runs in the
-    // MIDDLE of an open ImGui frame. load_all_worlds() pumps its own frames
-    // (NewFrame/Render/Swap) for the progress bar, so it must NOT run nested
-    // inside that frame (ImGui asserts). The callback sets this flag; run()
-    // services it at the top of the loop, before the frame begins.
+    
+    
+    
+    
+    
     bool m_pending_load_all = false;
 
     GPUModel* world_get_or_load_model(const std::string& asset_name);
     void      load_sector_terrain(const std::string& dat_path);
     void      build_world_draws(const WorldData& wd);
-    // Group m_world_draws by unique model into m_instanced_world (instanced draw
-    // calls). The per-model GPU geometry is SHARED (kept in m_world_gpu_cache),
-    // so nothing is freed here. Called once after a world load.
+    
+    
+    
     void      finalize_world_merge();
     void      recentre_camera_on_world();
     void      load_world(const std::string& dat_path);
     void      load_all_worlds();
     void      clear_world();
-    // Pump one minimal frame (poll events + clear + progress bar + swap) so the
-    // window stays responsive during a long synchronous world load instead of
-    // going "Not Responding". label/frac drive a centred progress overlay.
+    
+    
+    
     void      pump_loading_frame(const char* label, float frac);
-    // ─────────────────────────────────────────────────────────────────────────
+    
 
     void load_file(int idx);
     void scan_folder(const std::string& folder);

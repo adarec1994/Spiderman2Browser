@@ -24,8 +24,8 @@ struct AnimClip {
     int         track_count = 0;
     int         n_bones     = 0;
     float       qscale      = 0.f;
-    float       root_pos_scale = 0.001f; // ae_base_bone position scale (scale_table[0])
-    float       root_q_scale   = 0.001f; // ae_base_bone orientation scale (scale_table[1])
+    float       root_pos_scale = 0.001f; 
+    float       root_q_scale   = 0.001f; 
     std::vector<int> bone_indices;
 
     struct Section {
@@ -48,8 +48,8 @@ struct AnimClip {
     };
     std::vector<Section> sections;
 
-    // Rest pose quaternions (one per animated rotation track, indexed 0..n_bones-1)
-    // Must be set before calling sample_pose for correct results.
+    
+    
     std::vector<glm::quat> rest_pose;
     std::vector<glm::vec3> rest_positions;
 
@@ -62,21 +62,22 @@ struct AnimClip {
     void decode_all_frames() const;
 };
 
-// Per-skeleton animation metadata, located dynamically in the skeleton .dat
-// (a named-chunk container) so any character works, not just Black Cat. The
-// bone table, rest-pose quats, and per-source scale table live at different
-// offsets in every skeleton; they're found by structure, not hardcoded.
+
+
+
+
 struct SkeletonAnimMeta {
     bool  valid       = false;
-    int   bone_count  = 0;                 // total bones incl. root (pelvis)
-    std::vector<glm::quat> rest_pose;      // bone_count quats, game->GL converted (root = identity)
-    float root_pos_scale = 0.001f;         // scale_table[0]
-    float root_q_scale   = 0.001f;         // scale_table[1]
-    std::vector<float> quat_scales;        // bone_count-1 nal_quaternion track scales (scale_table[2..])
-    int   quat_track_count = 0;            // count of "nal_quaternion" sources (authoritative; 0=unknown)
+    int   bone_count  = 0;                 
+    std::vector<glm::quat> rest_pose;      
+    float root_pos_scale = 0.001f;         
+    float root_q_scale   = 0.001f;         
+    std::vector<float> quat_scales;        
+    int   quat_track_count = 0;            
+    float quat_effective_scale_cap = 0.0f; 
 };
-// bone_count comes from parse_skeleton (the bone table); pass it so the rest
-// pose and scale table are read with the right length.
+
+
 SkeletonAnimMeta load_skeleton_meta(const std::string& skel_path, int bone_count);
 
 std::vector<AnimClip> scan_animations(const std::string& folder);
