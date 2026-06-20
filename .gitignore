@@ -1,0 +1,12 @@
+cmake-build-*/
+build/
+out/
+.idea/
+src/.idea/
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.fbx
+*.glb
+*_textures/
