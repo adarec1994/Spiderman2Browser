@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cstdio>
 #include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
@@ -14,7 +15,43 @@ static constexpr const char* APP_NAME = "Spiderman 2 Asset Browser";
 
 static const char* CFG_PATH = "spiderman_2_asset_browser.cfg";
 static const char* LEGACY_CFG_PATH = "xbx_viewer.cfg";
+static int s_pending_model_export_idx = -1;
+static std::string s_pending_model_export_format;
 
+static std::string export_dialog_start_dir(const std::string& model_path, const std::string& folder) {
+    std::error_code ec;
+    fs::path p = fs::path(model_path).parent_path();
+    if (!p.empty() && fs::is_directory(p, ec)) return p.string();
+    if (!folder.empty() && fs::is_directory(folder, ec)) return folder;
+    return fs::current_path().string();
+}
+
+static void open_model_export_dialog(int idx, const std::string& fmt, UIState& state) {
+    if (idx < 0 || idx >= (int)state.files.size()) return;
+    s_pending_model_export_idx = idx;
+    s_pending_model_export_format = fmt;
+    IGFD::FileDialogConfig cfg;
+    cfg.path = export_dialog_start_dir(state.files[idx], state.folder);
+    cfg.fileName = fs::path(state.files[idx]).stem().string() + "." + fmt;
+    cfg.flags = ImGuiFileDialogFlags_Modal | ImGuiFileDialogFlags_ConfirmOverwrite;
+    std::string filters = "." + fmt;
+    std::string title = "Export model to " + fmt;
+    ImGuiFileDialog::Instance()->OpenDialog("MODEL_EXPORT", title.c_str(), filters.c_str(), cfg);
+}
+
+static std::string lower_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
+    return s;
+}
+
+static std::string with_extension(std::string path, const std::string& fmt) {
+    fs::path p(path);
+    std::string ext = lower_copy(p.extension().string());
+    std::string want = "." + fmt;
+    if (ext != want) p.replace_extension(want);
+    return p.string();
+}
 
 
 
@@ -184,6 +221,12 @@ void UI::draw(UIState& state, UICallbacks& cb,
                     if (ImGui::MenuItem("Extract model")) {
                         if (cb.on_extract_model) cb.on_extract_model(idx);
                     }
+                    if (ImGui::MenuItem("Export to GLB")) {
+                        open_model_export_dialog(idx, "glb", state);
+                    }
+                    if (ImGui::MenuItem("Export to FBX")) {
+                        open_model_export_dialog(idx, "fbx", state);
+                    }
                     ImGui::EndPopup();
                 }
             }
@@ -291,6 +334,24 @@ void UI::draw(UIState& state, UICallbacks& cb,
     ImGui::EndChild();
 
     ImGui::End();
+
+    float fdw = std::min(760.f, dw * 0.85f);
+    float fdh = std::min(500.f, dh * 0.75f);
+    ImGui::SetNextWindowPos({(dw - fdw) * 0.5f, (dh - fdh) * 0.5f}, ImGuiCond_Appearing);
+    if (ImGuiFileDialog::Instance()->Display("MODEL_EXPORT",
+            ImGuiWindowFlags_NoCollapse, {fdw, fdh}, {fdw, fdh})) {
+        if (ImGuiFileDialog::Instance()->IsOk() &&
+            s_pending_model_export_idx >= 0 &&
+            !s_pending_model_export_format.empty()) {
+            std::string path = with_extension(ImGuiFileDialog::Instance()->GetFilePathName(),
+                                              s_pending_model_export_format);
+            if (cb.on_export_model)
+                cb.on_export_model(s_pending_model_export_idx, s_pending_model_export_format, path);
+        }
+        s_pending_model_export_idx = -1;
+        s_pending_model_export_format.clear();
+        ImGuiFileDialog::Instance()->Close();
+    }
 
     if (state.mat_editor_open)
         draw_mat_editor(state, cb);

@@ -1,4 +1,5 @@
 #include "App.h"
+#include "ModelExporter.h"
 #include "Texture.h"
 #include "WorldParser.h"
 #include "Vfs.h"
@@ -239,6 +240,92 @@ void App::extract_model(int idx) {
 
     m_ui_state.status_msg = "Extracted " + src.filename().string()
                           + " (+" + std::to_string(skel) + " skel) to " + dst_dir.string();
+}
+
+void App::export_model(int idx, const std::string& format, const std::string& output_path) {
+    if (idx < 0 || idx >= (int)m_ui_state.files.size()) return;
+    std::string fmt = lower_copy(format);
+    if (fmt != "glb" && fmt != "fbx") return;
+    const std::string path = m_ui_state.files[idx];
+    if (!vfs::exists(path)) {
+        m_ui_state.status_msg = "Model source not found";
+        return;
+    }
+
+    m_ui_state.status_msg = "Exporting " + fmt + "...";
+    std::unique_ptr<XBXModel> model(parse_xbx(path, true));
+    if (!model) {
+        m_ui_state.status_msg = "Export failed: model parse failed";
+        return;
+    }
+
+    std::string skel_path;
+    std::unique_ptr<Skeleton> skeleton;
+    for (const std::string& candidate : ordered_skeleton_candidates(fs::path(path))) {
+        Skeleton* sk = parse_skeleton(candidate, path);
+        if (sk) {
+            skel_path = candidate;
+            skeleton.reset(sk);
+            break;
+        }
+    }
+
+    int bone_count = skeleton ? std::min((int)skeleton->bones.size(), N_BONES) : 0;
+    SkeletonAnimMeta meta = load_skeleton_meta(skel_path, bone_count);
+    bool minion = is_minion_lizard_model_path(path);
+    if (minion)
+        meta.quat_effective_scale_cap = 0.0078125f;
+
+    std::vector<AnimClip> clips = scan_animations(fs::path(path).parent_path().string());
+    if (minion) {
+        clips.erase(
+            std::remove_if(clips.begin(), clips.end(),
+                [](const AnimClip& c) {
+                    std::string name = lower_copy(c.name);
+                    return name.rfind("lzmn", 0) != 0;
+                }),
+            clips.end());
+    }
+
+    if (skeleton) {
+        for (AnimClip& clip : clips) {
+            parse_animation(clip, meta);
+            if (!clip.loaded) continue;
+            if (!meta.rest_pose.empty()) {
+                clip.rest_pose.resize(clip.n_bones);
+                for (int ai = 0; ai < clip.n_bones; ++ai) {
+                    int si = (ai < (int)clip.bone_indices.size()) ? clip.bone_indices[ai] : ai;
+                    clip.rest_pose[ai] = (si >= 0 && si < (int)meta.rest_pose.size())
+                                       ? meta.rest_pose[si]
+                                       : glm::quat(1, 0, 0, 0);
+                }
+            }
+            clip.frames_decoded = false;
+            clip.cached_frames.clear();
+            clip.cached_root_orientations.clear();
+        }
+        clips.erase(std::remove_if(clips.begin(), clips.end(),
+            [](const AnimClip& c){ return !c.loaded; }), clips.end());
+    } else {
+        clips.clear();
+    }
+
+    model_export::ExportRequest req;
+    req.model = model.get();
+    req.skeleton = skeleton.get();
+    req.skel_meta = &meta;
+    req.animations = &clips;
+    req.output_path = output_path;
+    req.minion_lizard = minion;
+
+    std::string error;
+    bool ok = fmt == "glb" ? model_export::export_glb(req, error)
+                           : model_export::export_fbx(req, error);
+    if (!ok) {
+        m_ui_state.status_msg = error.empty() ? "Export failed" : error;
+        return;
+    }
+    m_ui_state.status_msg = "Exported " + fs::path(output_path).filename().string();
 }
 
 void App::build_anim_bone_map(const AnimClip& clip) {
@@ -878,6 +965,9 @@ void App::setup_callbacks() {
     m_ui_cb.on_extract_anim = [this](int i){ extract_animation(i); };
     m_ui_cb.on_extract_all_anims = [this](){ extract_all_animations(); };
     m_ui_cb.on_extract_model = [this](int i){ extract_model(i); };
+    m_ui_cb.on_export_model = [this](int i, const std::string& fmt, const std::string& path){
+        export_model(i, fmt, path);
+    };
     m_ui_cb.on_tex_assign = [this](int smi, const std::string& stem) {
         if (!m_gpu_model || smi < 0 || smi >= (int)m_gpu_model->meshes.size()) return;
         std::string dir = fs::path(m_ui_state.files[m_ui_state.selected]).parent_path().string();

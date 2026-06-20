@@ -70,6 +70,7 @@ struct UICallbacks {
     std::function<void(int)>                     on_extract_anim;
     std::function<void()>                        on_extract_all_anims;
     std::function<void(int)>                     on_extract_model;
+    std::function<void(int, const std::string&, const std::string&)> on_export_model;
     std::function<void(int, const std::string&)> on_tex_assign;
     std::function<void(int)>                     on_load_world_file;  
     std::function<void()>                        on_load_all_worlds;  

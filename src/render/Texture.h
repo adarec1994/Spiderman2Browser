@@ -14,6 +14,12 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
 unsigned int find_texture(const std::vector<std::string>& hints, const std::string& model_dir);
 
 
+std::string resolve_texture_path(const std::string& hint, const std::string& model_dir);
+
+
+std::string resolve_texture_path(const std::vector<std::string>& hints, const std::string& model_dir);
+
+
 
 void build_tex_registry(const std::string& root_dir);
 

@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
 set(APP_TARGET Spiderman2AssetBrowser)
 set(APP_DISPLAY_NAME "Spiderman 2 Asset Browser")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 project(${APP_TARGET} VERSION 1.0 DESCRIPTION "${APP_DISPLAY_NAME}" LANGUAGES CXX)
 
@@ -17,6 +23,7 @@ FetchContent_Declare(glfw
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
@@ -75,6 +82,7 @@ target_include_directories(stb_lib INTERFACE ${stb_SOURCE_DIR})
 set(SOURCES
         src/core/main.cpp
         src/core/App.cpp
+        src/export/ModelExporter.cpp
         src/io/Vfs.cpp
         src/parsers/XBXParser.cpp
         src/parsers/Skeleton.cpp
@@ -93,6 +101,7 @@ set_target_properties(${APP_TARGET} PROPERTIES
 target_include_directories(${APP_TARGET} PRIVATE
         src
         src/core
+        src/export
         src/io
         src/render
         src/ui
@@ -107,6 +116,11 @@ target_link_libraries(${APP_TARGET} PRIVATE
         stb_lib)
 
 if(MSVC)
+    foreach(TARGET_NAME IN ITEMS glfw glad glm imgui_lib imguifiledialog_lib ${APP_TARGET})
+        if(TARGET ${TARGET_NAME})
+            set_property(TARGET ${TARGET_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        endif()
+    endforeach()
     target_compile_options(${APP_TARGET} PRIVATE
             $<$<CONFIG:Debug>:/Z7>
             /FS)

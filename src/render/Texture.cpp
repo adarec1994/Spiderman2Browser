@@ -289,8 +289,8 @@ void register_tex_alias(const std::string& alias, const std::string& target_stem
     std::sort(g_stems_sorted.begin(), g_stems_sorted.end());
 }
 
-static unsigned int registry_lookup(const std::string& hint) {
-    if (hint.empty() || g_registry.empty()) return 0;
+static std::string registry_lookup_path(const std::string& hint) {
+    if (hint.empty() || g_registry.empty()) return {};
 
     
     std::string base = hint;
@@ -318,7 +318,7 @@ static unsigned int registry_lookup(const std::string& hint) {
     };
     for (auto& t : tries) {
         auto it = g_registry.find(t);
-        if (it != g_registry.end()) return load_texture(it->second);
+        if (it != g_registry.end()) return it->second;
     }
 
     
@@ -329,7 +329,7 @@ static unsigned int registry_lookup(const std::string& hint) {
         for (int i = 0; suffixes[i]; ++i) {
             std::string key = basel + suffixes[i];
             auto it = g_registry.find(key);
-            if (it != g_registry.end()) return load_texture(it->second);
+            if (it != g_registry.end()) return it->second;
         }
     }
 
@@ -359,7 +359,7 @@ static unsigned int registry_lookup(const std::string& hint) {
             std::string best = best_numbered.empty() ? best_named : best_numbered;
             if (!best.empty()) {
                 auto rit = g_registry.find(best);
-                if (rit != g_registry.end()) return load_texture(rit->second);
+                if (rit != g_registry.end()) return rit->second;
             }
             
             auto pos = cur.rfind('_');
@@ -367,11 +367,16 @@ static unsigned int registry_lookup(const std::string& hint) {
             cur = cur.substr(0, pos);
         }
     }
-    return 0;
+    return {};
 }
 
-unsigned int find_texture(const std::string& hint, const std::string& model_dir) {
-    if (hint.empty()) return 0;
+static unsigned int registry_lookup(const std::string& hint) {
+    std::string path = registry_lookup_path(hint);
+    return path.empty() ? 0 : load_texture(path);
+}
+
+std::string resolve_texture_path(const std::string& hint, const std::string& model_dir) {
+    if (hint.empty()) return {};
 
     
     std::string base = hint;
@@ -430,12 +435,17 @@ unsigned int find_texture(const std::string& hint, const std::string& model_dir)
             std::string vl = v;
             std::transform(vl.begin(), vl.end(), vl.begin(), ::tolower);
             auto it = lmap.find(vl);
-            if (it != lmap.end()) return load_texture(it->second);
+            if (it != lmap.end()) return it->second;
         }
     }
 
     
-    return registry_lookup(hint);
+    return registry_lookup_path(hint);
+}
+
+unsigned int find_texture(const std::string& hint, const std::string& model_dir) {
+    std::string path = resolve_texture_path(hint, model_dir);
+    return path.empty() ? 0 : load_texture(path);
 }
 
 unsigned int find_texture(const std::vector<std::string>& hints, const std::string& model_dir) {
@@ -444,6 +454,14 @@ unsigned int find_texture(const std::vector<std::string>& hints, const std::stri
         if (tid) return tid;
     }
     return 0;
+}
+
+std::string resolve_texture_path(const std::vector<std::string>& hints, const std::string& model_dir) {
+    for (const auto& h : hints) {
+        std::string path = resolve_texture_path(h, model_dir);
+        if (!path.empty()) return path;
+    }
+    return {};
 }
 
 void get_registry_entries(std::vector<std::pair<std::string,std::string>>& out) {

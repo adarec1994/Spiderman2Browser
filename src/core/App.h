@@ -77,6 +77,7 @@ private:
     void extract_animation(int idx);
     void extract_all_animations();
     void extract_model(int idx);   
+    void export_model(int idx, const std::string& format, const std::string& output_path);
 
     std::vector<int> m_anim_bone_map;
     glm::quat m_anim_root_ref{1, 0, 0, 0}; 
